@@ -3,16 +3,16 @@ import asyncio
 import llm
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
-from textual import on, work
+from textual import on, work, events
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Input, Footer, Markdown, Button, TextArea, Static
+from textual.widgets import Header, Footer, Markdown, Button, TextArea, Static
 from textual.containers import VerticalScroll, Horizontal
 
 from src.config import MCPConfig
 from src.config_dialog import ConfigDialog
 from src.model_dialog import ModelDialog
 
-DEFAULT_SYSTEM_PROMPT = """Formulate all responses as if you were the sentient AI."""
+# System prompt is now defined in MCPConfig
 
 class Prompt(Markdown):
     pass
@@ -26,14 +26,78 @@ class ToolCall(Markdown):
 class MCPStatus(Static):
     """Show MCP connection status"""
 
+class ChatInput(TextArea):
+    """A custom TextArea for chat input that handles Enter and Shift+Enter properly."""
+
+    # Define bindings for both Shift+Enter and alternative Mac-compatible key combinations
+    BINDINGS = [
+        ("shift+enter", "send_message", "Send Message"),
+        # Add alternative key bindings that might work better on Mac
+        ("ctrl+enter", "send_message", "Send Message"),
+        ("meta+enter", "send_message", "Send Message"),  # Command+Enter on Mac
+    ]
+    
+    def _on_key(self, event: events.Key) -> None:
+        # Log the actual key being pressed to diagnose the issue
+        app = self.app
+        if isinstance(app, TerminalApp):
+            # Uncomment this for debugging
+            # app.notify(f"Raw key: {event.key}", timeout=1)
+            pass
+            
+        # Handle multiple key combinations to send messages (adapt for Mac)
+        if event.key in ["shift+enter", "ctrl+enter", "meta+enter"]:
+            app = self.app
+            if isinstance(app, TerminalApp):
+                user_input = self.text.strip()
+                if user_input:
+                    self.clear()
+                    asyncio.create_task(app._process_message_async(user_input))
+                
+                # Prevent default behavior
+                event.prevent_default()
+                event.stop()
+                return
+        
+        # For all other keys, use default behavior
+        super()._on_key(event)
+    
+    def action_send_message(self) -> None:
+        """Action to send the current message from the chat input."""
+        app = self.app
+        if isinstance(app, TerminalApp):
+            user_input = self.text.strip()
+            if user_input:
+                self.clear()
+                asyncio.create_task(app._process_message_async(user_input))
+
 class TerminalApp(App):
-    AUTO_FOCUS = "Input"
+    AUTO_FOCUS = "#chat-input"
 
     CSS = """
     #system-prompt {
         height: 4;
         margin: 1;
         border: solid $primary;
+    }
+
+    #chat-input {
+        height: 6;
+        margin: 1 0 0 1;
+        border: solid $primary;
+        width: 90%;
+    }
+    
+    #input-container {
+        height: 6;
+        margin: 0;
+        padding: 0;
+    }
+    
+    #send-button {
+        margin: 1 1 0 0;
+        width: 10%;
+        height: 6;
     }
 
     #controls {
@@ -91,7 +155,23 @@ class TerminalApp(App):
     Notification.-success {
         background: $success;
     }
+
+    .input-help {
+        margin: 0 1 1 1;
+        color: $text-muted;
+        text-align: right;
+        height: 1;
+    }
     """
+
+    # Add global bindings with Mac alternatives
+    BINDINGS = [
+        ("shift+enter", "send_message", "Send Message"),
+        ("ctrl+enter", "send_message", "Send Message"),
+        ("meta+enter", "send_message", "Send Message"),  # Command+Enter on Mac
+        # Add a debug key binding to show key info
+        ("f1", "show_key_info", "Display Key Info"),
+    ]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -99,10 +179,12 @@ class TerminalApp(App):
         self.mcp_tools: list[types.Tool] = []
         self.mcp_connected = False
         self.config = MCPConfig.load()
+        self.system_prompt = self.config.system_prompt
+        self.is_initializing = True
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield TextArea(DEFAULT_SYSTEM_PROMPT, id="system-prompt")
+        yield TextArea(self.system_prompt, id="system-prompt")
         with Horizontal(id="controls"):
             yield Button("New Conversation", id="new-conversation")
             yield Button("Connect MCP Server", id="connect-mcp")
@@ -111,20 +193,46 @@ class TerminalApp(App):
         yield MCPStatus("MCP: Not Connected")
         with VerticalScroll(id="chat-view"):
             yield Response("TERMINAL READY")
-        yield Input(placeholder="How can I help you?")
+        with Horizontal(id="input-container"):
+            yield ChatInput(id="chat-input", classes="chat-input")
+            yield Button("Send", id="send-button", variant="primary")
+        yield Static("Enter: new line | Shift+Enter or Ctrl+Enter or Click Send: send message", classes="input-help")
         yield Footer()
 
     def on_mount(self) -> None:
-        self.model = llm.get_model("gpt-4o")
-        self.system_prompt = DEFAULT_SYSTEM_PROMPT
+        try:
+            # Try to use gpt-4.5-preview as the default model
+            self.model = llm.get_model("gpt-4.5-preview")
+        except Exception:
+            # Fall back to system default if gpt-4.5-preview is not available
+            self.model = llm.get_model()
+        
         self.query_one("#system-prompt").load_text(self.system_prompt)
         self._update_model_status()
+        
+        # Configure text areas
+        chat_input = self.query_one("#chat-input", ChatInput)
+        chat_input.show_line_numbers = False
+        self.query_one("#system-prompt", TextArea).show_line_numbers = False
+        
+        # Make sure the chat input is focused
+        chat_input.focus()
+        
+        # Set to False after initialization is complete
+        self.is_initializing = False
 
     @on(TextArea.Changed, "#system-prompt")
     def on_system_prompt_changed(self, event: TextArea.Changed) -> None:
         text_area = self.query_one("#system-prompt", TextArea)
         self.system_prompt = text_area.text
-        self.notify("System prompt updated")
+        
+        # Save the updated system prompt to config
+        self.config.system_prompt = self.system_prompt
+        self.config.save()
+        
+        # Only show notification if not during initial app loading
+        if not self.is_initializing:
+            self.notify("System prompt updated and saved")
 
     @on(Button.Pressed, "#new-conversation")
     def on_new_conversation(self) -> None:
@@ -153,8 +261,15 @@ class TerminalApp(App):
         model_id = await self.push_screen(dialog)
         if model_id:
             self.model = llm.get_model(model_id)
-            self._update_model_status()
-            self.notify(f"Switched to model: {model_id}")
+            # Set this as the default model for future sessions
+            try:
+                import subprocess
+                subprocess.run(["llm", "models", "default", model_id], check=True)
+                self._update_model_status()
+                self.notify(f"Switched to model: {model_id} and set as default")
+            except Exception as e:
+                self._update_model_status()
+                self.notify(f"Switched to model: {model_id} (couldn't set as default: {str(e)})")
 
     @work(thread=True)
     def connect_mcp_server(self) -> None:
@@ -221,17 +336,19 @@ class TerminalApp(App):
         else:
             status.update(f"Model: {model_name} | MCP: Not Connected")
 
-    @on(Input.Submitted)
-    async def on_input(self, event: Input.Submitted) -> None:
-        chat_view = self.query_one("#chat-view")
-        user_input = event.value
-        event.input.clear()
+    def on_key(self, event: events.Key) -> None:
+        """Global key handler for debugging."""
+        # Uncomment this to debug specific key issues
+        # if event.key in ["shift+enter", "ctrl+enter", "meta+enter", "enter"]:
+        #     self.notify(f"Global key handler: {event.key}", timeout=2)
+        pass
 
+    async def _process_message_async(self, user_input: str) -> None:
+        """Process a user message asynchronously."""
+        chat_view = self.query_one("#chat-view")
         await chat_view.mount(Prompt(user_input))
         await chat_view.mount(response := Response())
         response.anchor()
-
-        # Process the input, checking if it might need MCP tools
         self.process_input(user_input, response)
 
     @work(thread=True)
@@ -310,6 +427,32 @@ class TerminalApp(App):
         result = await self.session.call_tool(tool_name, arguments)
         return result
 
+    @on(Button.Pressed, "#send-button")
+    def on_send_button_pressed(self) -> None:
+        """Handle the Send button being pressed."""
+        chat_input = self.query_one("#chat-input", ChatInput)
+        user_input = chat_input.text.strip()
+        if user_input:
+            chat_input.clear()
+            asyncio.create_task(self._process_message_async(user_input))
+            
+    def action_send_message(self) -> None:
+        """Send message from the chat input using keyboard shortcut."""
+        chat_input = self.query_one("#chat-input", ChatInput)
+        if chat_input:
+            user_input = chat_input.text.strip()
+            if user_input:
+                chat_input.clear()
+                asyncio.create_task(self._process_message_async(user_input))
+
+    def action_show_key_info(self) -> None:
+        """Display information about key bindings for debugging."""
+        # Shows a notification with key binding info
+        self.notify(
+            "Key bindings: Shift+Enter, Ctrl+Enter, or Cmd+Enter to send messages.\n"
+            "If Shift+Enter doesn't work, try the alternatives.",
+            timeout=8
+        )
 
 if __name__ == "__main__":
     app = TerminalApp()

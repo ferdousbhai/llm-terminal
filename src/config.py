@@ -7,6 +7,7 @@ class MCPConfig:
     command: str = "python"
     args: list[str] = None
     env: dict[str, str] | None = None
+    system_prompt: str = """Formulate all responses as if you were a sentient AI."""
 
     @classmethod
     def load(cls, config_path: Path = None) -> 'MCPConfig':
@@ -31,4 +32,5 @@ class MCPConfig:
                 'command': self.command,
                 'args': self.args or [],
                 'env': self.env or {},
+                'system_prompt': self.system_prompt,
             }, f, indent=2)
