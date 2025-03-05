@@ -9,8 +9,8 @@ from textual.widgets import Header, Footer, Markdown, Button, TextArea, Static
 from textual.containers import VerticalScroll, Horizontal
 
 from src.config import MCPConfig
-from src.config_dialog import ConfigDialog
-from src.model_dialog import ModelDialog
+from src.ui.config_dialog import ConfigDialog
+from src.ui.model_dialog import ModelDialog
 
 # System prompt is now defined in MCPConfig
 

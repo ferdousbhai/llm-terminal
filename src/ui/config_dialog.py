@@ -1,24 +1,25 @@
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Label, Select
+from textual.widgets import Button, Input, Label
 from textual.binding import Binding
-import llm
 
-class ModelDialog(ModalScreen):
+from src.config import MCPConfig
+
+class ConfigDialog(ModalScreen):
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
     ]
 
     DEFAULT_CSS = """
-    ModelDialog {
+    ConfigDialog {
         align: center middle;
     }
 
     #dialog {
         grid-size: 2;
         grid-gutter: 1 2;
-        grid-rows: 3;
+        grid-rows: 4;
         padding: 1 2;
         width: 60;
         height: auto;
@@ -38,18 +39,23 @@ class ModelDialog(ModalScreen):
     }
     """
 
-    def __init__(self):
+    def __init__(self, config: MCPConfig):
         super().__init__()
-        self.models = [(model.model_id, model.model_id) for model in llm.get_models()]
-        self.current_model = llm.get_model().model_id
+        self.config = config
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
-            yield Label("Select Model:")
-            yield Select(
-                options=self.models,
-                value=self.current_model,
-                id="model"
+            yield Label("Command:")
+            yield Input(
+                value=self.config.command,
+                id="command",
+                placeholder="python"
+            )
+            yield Label("Arguments (comma-separated):")
+            yield Input(
+                value=",".join(self.config.args) if self.config.args else "",
+                id="args",
+                placeholder="path/to/server.py,--arg1,--arg2"
             )
             with Vertical(id="buttons"):
                 yield Button("Save", variant="primary", id="save")
@@ -57,10 +63,16 @@ class ModelDialog(ModalScreen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "save":
-            selected_model = self.query_one("#model").value
-            self.dismiss(selected_model)
+            command = self.query_one("#command").value
+            args = [arg.strip() for arg in self.query_one("#args").value.split(",") if arg.strip()]
+
+            self.config.command = command
+            self.config.args = args
+            self.config.save()
+
+            self.dismiss(True)
         else:
-            self.dismiss(None)
+            self.dismiss(False)
 
     def action_cancel(self) -> None:
-        self.dismiss(None)
+        self.dismiss(False)

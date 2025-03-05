@@ -1,24 +1,25 @@
+import llm
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label
+from textual.widgets import Button, Label, Select
 from textual.binding import Binding
-from src.config import MCPConfig
 
-class ConfigDialog(ModalScreen):
+
+class ModelDialog(ModalScreen):
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
     ]
 
     DEFAULT_CSS = """
-    ConfigDialog {
+    ModelDialog {
         align: center middle;
     }
 
     #dialog {
         grid-size: 2;
         grid-gutter: 1 2;
-        grid-rows: 4;
+        grid-rows: 3;
         padding: 1 2;
         width: 60;
         height: auto;
@@ -38,23 +39,18 @@ class ConfigDialog(ModalScreen):
     }
     """
 
-    def __init__(self, config: MCPConfig):
+    def __init__(self):
         super().__init__()
-        self.config = config
+        self.models = [(model.model_id, model.model_id) for model in llm.get_models()]
+        self.current_model = llm.get_model().model_id
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
-            yield Label("Command:")
-            yield Input(
-                value=self.config.command,
-                id="command",
-                placeholder="python"
-            )
-            yield Label("Arguments (comma-separated):")
-            yield Input(
-                value=",".join(self.config.args) if self.config.args else "",
-                id="args",
-                placeholder="path/to/server.py,--arg1,--arg2"
+            yield Label("Select Model:")
+            yield Select(
+                options=self.models,
+                value=self.current_model,
+                id="model"
             )
             with Vertical(id="buttons"):
                 yield Button("Save", variant="primary", id="save")
@@ -62,16 +58,10 @@ class ConfigDialog(ModalScreen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "save":
-            command = self.query_one("#command").value
-            args = [arg.strip() for arg in self.query_one("#args").value.split(",") if arg.strip()]
-
-            self.config.command = command
-            self.config.args = args
-            self.config.save()
-
-            self.dismiss(True)
+            selected_model = self.query_one("#model").value
+            self.dismiss(selected_model)
         else:
-            self.dismiss(False)
+            self.dismiss(None)
 
     def action_cancel(self) -> None:
-        self.dismiss(False)
+        self.dismiss(None)
