@@ -1,15 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
-name = "Terminal-App"
+name = "LLM-Terminal"
 version = "0.1.0"
-description = "Add your description here"
+description = "A terminal-based chat application with LLM integration"
 readme = "README.md"
 requires-python = ">=3.12"
+authors = [
+    { name = "Your Name", email = "your.email@example.com" }
+]
+license = { text = "MIT" }
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Utilities",
+]
 dependencies = [
     "llm>=0.23",
     "mcp[cli]>=1.3.0",
-    "ruff>=0.9.9",
     "textual>=2.1.2",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.9.9",
+    "pytest>=8.0.0",
+    "black>=24.2.0",
+    "mypy>=1.8.0",
+]
+
 [project.scripts]
-terminal-app = "src.main:TerminalApp.run"
+llm-terminal = "src.app:TerminalApp.run"
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+select = ["E", "F", "B", "I", "N", "UP", "PL", "RUF"]
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true

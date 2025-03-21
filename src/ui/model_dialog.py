@@ -1,13 +1,15 @@
+from typing import ClassVar
+
 import llm
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Label, Select
-from textual.binding import Binding
 
 
 class ModelDialog(ModalScreen):
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("escape", "cancel", "Cancel"),
     ]
 
@@ -62,6 +64,3 @@ class ModelDialog(ModalScreen):
             self.dismiss(selected_model)
         else:
             self.dismiss(None)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)

@@ -1,0 +1,87 @@
+#system-prompt {
+    height: 4;
+    margin: 1;
+    border: solid $primary;
+}
+
+#chat-input {
+    height: 6;
+    margin: 1 0 0 1;
+    border: solid $primary;
+    width: 90%;
+}
+
+#input-container {
+    height: 6;
+    margin: 0;
+    padding: 0;
+}
+
+#send-button {
+    margin: 1 1 0 0;
+    width: 10%;
+    height: 6;
+}
+
+#controls {
+    height: 3;
+    margin: 0 1;
+}
+
+Prompt {
+    background: $primary 10%;
+    color: $text;
+    margin: 1;
+    margin-right: 8;
+    padding: 1 2 0 2;
+}
+
+Response {
+    border: wide $success;
+    background: $success 10%;
+    color: $text;
+    margin: 1;
+    margin-left: 8;
+    padding: 1 2 0 2;
+}
+
+ToolCall {
+    border: wide $warning;
+    background: $warning 10%;
+    color: $text;
+    margin: 1;
+    padding: 1 2 0 2;
+}
+
+MCPStatus {
+    width: 100%;
+    background: $surface;
+    color: $text-muted;
+    padding: 0 1;
+    text-align: right;
+}
+
+Notification {
+    padding: 1 2;
+    background: $primary;
+    color: $text;
+}
+
+Notification.-error {
+    background: $error;
+}
+
+Notification.-warning {
+    background: $warning;
+}
+
+Notification.-success {
+    background: $success;
+}
+
+.input-help {
+    margin: 0 1 1 1;
+    color: $text-muted;
+    text-align: right;
+    height: 1;
+} 
