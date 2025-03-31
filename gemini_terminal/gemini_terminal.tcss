@@ -1,0 +1,173 @@
+/* Main app styling */
+#app-container {
+    layout: vertical;
+    width: 100%;
+    height: 100%;
+    padding: 1;
+}
+
+/* Chat view styling */
+#chat-view {
+    width: 100%;
+    height: 1fr;
+    border: solid $boost;
+}
+
+/* Input container styling */
+#input-container {
+    width: 100%;
+    height: auto;
+}
+
+/* Input row styling */
+#input-row {
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+}
+
+/* New conversation button styling */
+#new-conversation-btn {
+    min-width: 8;
+    height: 3;
+    margin-right: 1;
+}
+
+/* Input styling */
+#chat-input {
+    width: 1fr;
+    border: solid $primary;
+    height: 3;
+}
+
+/* Server containers */
+#servers-container {
+    margin-top: 1;
+    height: auto;
+    width: 100%;
+}
+
+#server-buttons {
+    height: auto;
+    width: 100%;
+    align: left middle;
+}
+
+#server-actions {
+    height: auto;
+    margin-top: 1;
+    width: 100%;
+    align: right middle;
+}
+
+/* Individual message styling */
+Prompt {
+    background: $surface;
+    color: $text;
+    margin: 1;
+    margin-right: 8;
+    padding: 1 2;
+    border-left: solid $primary;
+}
+
+Response {
+    border: panel $success;
+    background: $boost;
+    color: $text;
+    margin: 1;
+    margin-left: 8;
+    padding: 1 2;
+}
+
+/* Server buttons */
+ServerButton {
+    margin-right: 1;
+}
+
+/* Modal screens */
+#settings-modal, #server-modal {
+    grid-size: 2;
+    grid-rows: 1fr 6fr 1fr;
+    grid-columns: 1fr;
+    align: center middle;
+    width: 60;
+    height: 80%;
+    border: thick $primary;
+    background: $surface;
+    padding: 2;
+}
+
+#settings-title, #server-title {
+    column-span: 2;
+    content-align: center middle;
+    text-style: bold;
+    width: 100%;
+    height: 3;
+    background: $primary 20%;
+    color: $text;
+}
+
+#settings-content, #server-content {
+    column-span: 2;
+    height: 100%;
+    width: 100%;
+    overflow: auto;
+    padding: 1;
+}
+
+#settings-buttons, #server-buttons {
+    column-span: 2;
+    width: 100%;
+    height: 100%;
+    align: right middle;
+}
+
+#settings-cancel, #server-cancel {
+    margin-right: 1;
+}
+
+/* Form elements in modals */
+#settings-content Input, #server-content Input {
+    width: 100%;
+    margin-bottom: 1;
+}
+
+#settings-content TextArea, #server-content TextArea {
+    width: 100%;
+    height: 6;
+    margin-bottom: 1;
+}
+
+#settings-content Label, #server-content Label {
+    margin-top: 1;
+    margin-bottom: 1;
+    color: $text-muted;
+}
+
+/* API Key verification UI */
+#settings-loading {
+    width: 100%;
+    height: 1;
+    margin-top: 1;
+    margin-bottom: 1;
+}
+
+#settings-loading.hide {
+    display: none;
+}
+
+#settings-message {
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+    margin-bottom: 1;
+    text-align: center;
+}
+
+#settings-message.success {
+    color: $success;
+}
+
+#settings-message.error {
+    color: $error;
+} 
