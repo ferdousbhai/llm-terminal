@@ -1,59 +1,58 @@
-# Gemini Terminal
+# LLM Terminal
 
-A terminal-based UI for Google's Gemini AI with MCP tool integration. This application provides a text-based interface for interacting with Google's Gemini AI models while allowing integration with external tools through the MCP (Model Control Protocol) standard.
+A terminal-based UI for interacting with LLMs through PydanticAI with MCP tool integration. This application provides a text-based interface for communicating with AI models while enabling Python code execution through MCP.
 
 ## Features
 
 - Terminal UI built with Textual
-- Google Gemini AI integration
-- MCP server support for tool calling
-- Configuration management
-- Customizable system prompts
+- PydanticAI integration for LLM interactions
+- MCP integration for Python code execution
+- Streaming responses with markdown formatting
 
 ## Installation
 
-You can install the package using `uv`:
-
 ```bash
-uv pip install gemini-terminal
-```
+# Clone the repository
+git clone https://github.com/yourusername/llm-terminal.git
+cd llm-terminal
 
-Or from source:
-
-```bash
-git clone https://github.com/yourusername/gemini-terminal.git
-cd gemini-terminal
+# Install with uv
 uv pip install -e .
 ```
 
+## Prerequisites
+
+- Python 3.10 or higher
+- Deno (for MCP Python code execution)
+
 ## Usage
 
-After installation, you can run the application using:
+Run the application using:
 
 ```bash
-gemini-terminal
+llm-terminal
 ```
 
-## Configuration
+Or directly with Python:
 
-On first run, the application will create a configuration file at `~/.gemini_terminal.yaml`. You will need to set your Gemini API key in the settings (Ctrl+S).
+```bash
+python -m llm_terminal.app
+```
 
-## MCP Tool Integration
+## How It Works
 
-The application supports MCP servers for tool integration. You can add servers in the UI and toggle them on/off as needed.
+This application uses:
+- Textual for the terminal UI
+- PydanticAI as the client library for LLM interactions
+- MCP (Model Context Protocol) for enabling Python code execution
+
+The MCP server allows the LLM to execute Python code in a secure sandbox environment powered by Pyodide.
 
 ## Development
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/gemini-terminal.git
-cd gemini-terminal
-
 # Install development dependencies
 uv pip install -e ".[dev]"
-
-# Run tests
-pytest
 ```
 
 ## License
