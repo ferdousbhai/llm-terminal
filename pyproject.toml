@@ -17,6 +17,7 @@ dependencies = [
     "pydantic-ai-slim[mcp,openai]",
     "openai",
     "ruff",
+    "ipykernel>=6.29.5",
 ]
 
 [project.scripts]

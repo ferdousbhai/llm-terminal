@@ -1,9 +1,10 @@
+import logging
 from datetime import datetime
 
 from textual import on, work
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Input, Footer, Markdown
-from textual.containers import VerticalScroll
+from textual.widgets import Header, Input, Footer, Markdown, Button
+from textual.containers import VerticalScroll, Horizontal
 
 from pydantic_ai import Agent
 from pydantic_ai.mcp import MCPServerStdio
@@ -17,7 +18,7 @@ class Prompt(Markdown):
 
 class Response(Markdown):
     """Widget for AI responses"""
-    BORDER_TITLE = "AI"
+    pass
 
 class TerminalApp(App):
     """A terminal-based chat interface for PydanticAI with MCP integration"""
@@ -40,6 +41,14 @@ class TerminalApp(App):
         margin-left: 8;
         padding: 1 2 0 2;
     }
+
+    #chat-view {  /* Ensure chat view takes available space */
+        height: 1fr;
+    }
+
+    Horizontal { /* Ensure the button/input row takes minimal height */
+        height: auto;
+    }
     """
 
     def compose(self) -> ComposeResult:
@@ -47,7 +56,9 @@ class TerminalApp(App):
         yield Header()
         with VerticalScroll(id="chat-view"):
             yield Response(f"# {self.get_time_greeting()} How can I help?")
-        yield Input(placeholder="Ask me anything...")
+        with Horizontal():
+            yield Button("New Chat", id="new-chat-button")
+            yield Input(placeholder="Ask me anything...")
         yield Footer()
 
     def get_time_greeting(self) -> str:
@@ -63,7 +74,7 @@ class TerminalApp(App):
     def on_mount(self) -> None:
         """Initialize the agent and MCP server on app mount"""
         # Define the MCP server for Python code execution
-        self.server = MCPServerStdio(
+        run_python_server = MCPServerStdio(
             'deno',
             args=[
                 'run',
@@ -75,8 +86,11 @@ class TerminalApp(App):
                 'stdio',
             ]
         )
+        self.servers = [run_python_server]
+        # Store the model identifier string
+        self.model_identifier = "openai:gpt-4o"
         # Create the agent with the MCP server
-        self.agent = Agent("openai:gpt-4o", system_prompt=SYSTEM, mcp_servers=[self.server])
+        self.agent = Agent(self.model_identifier, system_prompt=SYSTEM, mcp_servers=self.servers)
         # Initialize message history
         self.message_history = []
 
@@ -96,31 +110,70 @@ class TerminalApp(App):
 
         # Process the prompt
         self.process_prompt(prompt, response)
+        logging.info(f"Input submitted: {prompt}")
 
     @work(thread=True)
     async def process_prompt(self, prompt: str, response: Response) -> None:
         """Process the prompt with the agent and update the response"""
-        response_content = "**AI:** "
+        logging.info(f"Processing prompt: {prompt}")
+        # Use the model identifier for the prefix
+        response_content = f"**{self.model_identifier}:** "
+        self.call_from_thread(response.update, response_content)
 
-        # Process the prompt with the agent inside a context manager
-        async with self.agent.run_mcp_servers():
-            # Use message history for context
-            result = await self.agent.run(prompt, message_history=self.message_history)
+        # Use message history and stream the response within MCP context
+        try:
+            async with self.agent.run_mcp_servers():
+                logging.info("MCP servers started.")
+                # Stream the response using async context manager, passing history
+                async with self.agent.run_stream(prompt, message_history=self.message_history) as run_result:
+                    logging.info("Agent stream started.")
+                    async for accumulated_chunk in run_result.stream():
+                        response_content = f"**{self.model_identifier}:** {accumulated_chunk}"
+                        logging.info(f"Updating response widget with: {response_content!r}")
+                        self.call_from_thread(response.update, response_content)
 
-            # Update message history with new messages
-            self.message_history = result.all_messages()
+                    # Update message history after the stream completes
+                    self.message_history = run_result.all_messages()
+                    logging.info(f"Message history updated. Length: {len(self.message_history)}")
 
-            if hasattr(result, 'data'):
-                response_content += result.data
-            else:
-                response_content += "I couldn't generate a response."
+            logging.info("MCP servers stopped.")
+        except Exception as e:
+            logging.exception(f"Error during prompt processing: {e}")
+            self.call_from_thread(response.update, f"{response_content}\n\n**Error:** {e}")
 
-            self.call_from_thread(response.update, response_content)
+        # Final display state is handled within the loop's last update
+        logging.debug(f"Final response content after history update: {response_content}")
+
+    @on(Button.Pressed, "#new-chat-button")
+    async def on_new_chat_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle the 'New Chat' button press."""
+        logging.info("'New Chat' button pressed. Clearing history and display.")
+        # Clear the message history
+        self.message_history = []
+
+        # Clear the chat view
+        chat_view = self.query_one("#chat-view")
+        await chat_view.remove_children()
+
+        # Add the initial greeting back
+        await chat_view.mount(Response(f"# {self.get_time_greeting()} How can I help?"))
+
+        # Focus the input again
+        self.query_one(Input).focus()
 
 def main():
     """Entry point for the application."""
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,  # Changed from DEBUG to INFO
+        format='%(asctime)s - %(levelname)s - %(threadName)s - %(message)s',
+        filename='app.log',  # Log to a file
+        filemode='w'  # Overwrite the log file each time
+    )
+    logging.info("Application starting.")
     app = TerminalApp()
     app.run()
+    logging.info("Application finished.")
 
 if __name__ == "__main__":
     main()
