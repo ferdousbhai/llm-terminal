@@ -13,11 +13,11 @@ A terminal-based UI for interacting with LLMs through PydanticAI with MCP tool i
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/llm-terminal.git
+git clone https://github.com/ferdousbhai/llm-terminal.git
 cd llm-terminal
 
 # Install with uv
-uv pip install -e .
+uv sync
 ```
 
 ## Prerequisites
@@ -30,29 +30,7 @@ uv pip install -e .
 Run the application using:
 
 ```bash
-llm-terminal
-```
-
-Or directly with Python:
-
-```bash
-python -m llm_terminal.app
-```
-
-## How It Works
-
-This application uses:
-- Textual for the terminal UI
-- PydanticAI as the client library for LLM interactions
-- MCP (Model Context Protocol) for enabling Python code execution
-
-The MCP server allows the LLM to execute Python code in a secure sandbox environment powered by Pyodide.
-
-## Development
-
-```bash
-# Install development dependencies
-uv pip install -e ".[dev]"
+uv run llm-terminal
 ```
 
 ## License
