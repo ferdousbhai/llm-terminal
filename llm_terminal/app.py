@@ -3,7 +3,7 @@ from datetime import datetime
 
 from textual import on, work
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Input, Footer, Markdown, Button
+from textual.widgets import Header, Input, Footer, Markdown, Button, Label
 from textual.containers import VerticalScroll, Horizontal
 
 from pydantic_ai import Agent
@@ -46,19 +46,39 @@ class TerminalApp(App):
         height: 1fr;
     }
 
-    Horizontal { /* Ensure the button/input row takes minimal height */
+    Horizontal { /* Ensure the button/input rows take minimal height */
         height: auto;
+    }
+
+    Label.label { /* Style for the new labels */
+        margin: 1 1 1 2; /* Adjust margins T R B L */
+        width: 15; /* Fixed width for alignment */
+        text-align: right;
+    }
+
+    #system-prompt-input { /* Make prompt input take more space */
+        width: 1fr;
+    }
+
+    #model-input { /* Make model input take more space */
+        width: 1fr;
     }
     """
 
     def compose(self) -> ComposeResult:
         """Compose the UI layout"""
         yield Header()
+        with Horizontal(): # Model Selection row
+            yield Label("Model:", classes="label")
+            yield Input(id="model-input", placeholder="Model (e.g., openai:gpt-4o)")
+        with Horizontal(): # System Prompt row
+            yield Label("System Prompt:", classes="label")
+            yield Input(id="system-prompt-input", placeholder="Enter system prompt...")
         with VerticalScroll(id="chat-view"):
             yield Response(f"# {self.get_time_greeting()} How can I help?")
-        with Horizontal():
+        with Horizontal(): # Input/New Chat row (remains at bottom)
             yield Button("New Chat", id="new-chat-button")
-            yield Input(placeholder="Ask me anything...")
+            yield Input(id="chat-input", placeholder="Ask me anything...")
         yield Footer()
 
     def get_time_greeting(self) -> str:
@@ -89,14 +109,34 @@ class TerminalApp(App):
         self.servers = [run_python_server]
         # Store the model identifier string
         self.model_identifier = "openai:gpt-4o"
+        # Store the system prompt
+        self.system_prompt = SYSTEM # Use the constant defined earlier
+        # Initialize the model input with the default
+        self.query_one("#model-input", Input).value = self.model_identifier
+        # Initialize the system prompt input with the default
+        self.query_one("#system-prompt-input", Input).value = self.system_prompt
         # Create the agent with the MCP server
-        self.agent = Agent(self.model_identifier, system_prompt=SYSTEM, mcp_servers=self.servers)
+        self.initialize_agent()
         # Initialize message history
         self.message_history = []
+        # Set focus to the main chat input
+        self.query_one("#chat-input", Input).focus()
 
-    @on(Input.Submitted)
+    def initialize_agent(self) -> None:
+        """Initializes or re-initializes the agent with the current model identifier."""
+        logging.info(f"Initializing agent with model: {self.model_identifier} and prompt: '{self.system_prompt[:50]}...'") # Log truncated prompt
+        try:
+            self.agent = Agent(self.model_identifier, system_prompt=self.system_prompt, mcp_servers=self.servers)
+            logging.info(f"Agent initialized successfully with {self.model_identifier}")
+        except Exception as e:
+            logging.error(f"Failed to initialize agent with {self.model_identifier}: {e}")
+            # Optionally, provide feedback to the user in the UI
+            # For now, we just log the error. The agent might be in an invalid state.
+            # Consider resetting to a default or previous valid model?
+
+    @on(Input.Submitted, "#chat-input")
     async def on_input(self, event: Input.Submitted) -> None:
-        """Handle input submissions"""
+        """Handle input submissions from the main chat input"""
         chat_view = self.query_one("#chat-view")
         prompt = event.value
         event.input.clear()
@@ -143,6 +183,36 @@ class TerminalApp(App):
 
         # Final display state is handled within the loop's last update
         logging.debug(f"Final response content after history update: {response_content}")
+
+    @on(Input.Submitted, "#model-input")
+    def on_model_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle the model input submission."""
+        new_model_identifier = event.value
+        if new_model_identifier and new_model_identifier != self.model_identifier:
+            self.model_identifier = new_model_identifier
+            logging.info(f"Model identifier changed to: {self.model_identifier}")
+            # Re-initialize the agent with the new model
+            self.initialize_agent()
+            self.query_one("#chat-view").mount(Markdown(f"*Model set to **{self.model_identifier}**.*"))
+            self.query_one("#chat-input").focus() # Focus main input
+        elif not new_model_identifier:
+            logging.warning("Model input submitted empty.")
+        else:
+            logging.info("Model input submitted, but model identifier is unchanged.")
+
+    @on(Input.Submitted, "#system-prompt-input")
+    def on_system_prompt_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle the system prompt input submission."""
+        new_prompt = event.value
+        if new_prompt != self.system_prompt:
+            self.system_prompt = new_prompt
+            logging.info(f"System prompt updated to: '{self.system_prompt[:50]}...'")
+            # Re-initialize the agent with the new prompt
+            self.initialize_agent()
+            self.query_one("#chat-view").mount(Markdown("*System prompt updated.*"))
+            self.query_one("#chat-input").focus() # Focus main input
+        else:
+            logging.info("System prompt submitted, but prompt is unchanged.")
 
     @on(Button.Pressed, "#new-chat-button")
     async def on_new_chat_button_pressed(self, event: Button.Pressed) -> None:
