@@ -11,6 +11,24 @@
         "jsr:@pydantic/mcp-run-python",
         "stdio"
       ]
+    },
+    "tastytrade": {
+      "command": "/Users/ferdousahmed/.local/bin/uv",
+      "args": [
+        "--directory",
+        "/Users/ferdousahmed/Projects/github.com/ferdousbhai/tasty-agent",
+        "run",
+        "tasty-agent"
+      ]
+    },
+    "investor": {
+      "command": "/Users/ferdousahmed/.local/bin/uv",
+      "args": [
+        "--directory",
+        "/Users/ferdousahmed/Projects/github.com/ferdousbhai/investor-agent",
+        "run",
+        "investor-agent"
+      ]
     }
   }
 }

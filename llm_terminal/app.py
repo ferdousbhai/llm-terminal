@@ -235,15 +235,28 @@ class TerminalApp(App):
 
                     self.message_history = run_result.all_messages()
                     logging.info(f"Message history updated. Length: {len(self.message_history)}")
+
                     # Log the final response from the agent
-                    if self.message_history:
-                         final_response_message = next((msg for msg in reversed(self.message_history) if msg.get('role') == 'assistant'), None)
-                         if final_response_message:
-                             logging.info(f"Agent final response: {final_response_message.get('content')}")
-                         else:
-                              logging.warning("Could not find assistant message in final history to log.")
-                    else:
-                        logging.warning("Message history is empty after stream completion.")
+                    final_response_text = None
+                    try:
+                        for msg in reversed(self.message_history):
+                            # Check if it's a ModelResponse likely containing the final text
+                            if hasattr(msg, 'kind') and msg.kind == 'response' and hasattr(msg, 'parts'):
+                                for part in msg.parts:
+                                    # Find a part with content that isn't a known non-text type (like ToolCallPart)
+                                    # Heuristic: check for 'content' and lack of 'tool_call_id'
+                                    if hasattr(part, 'content') and not hasattr(part, 'tool_call_id'):
+                                        final_response_text = part.content
+                                        break # Found the text part
+                                if final_response_text is not None:
+                                    break # Found the text in the latest relevant message
+
+                        if final_response_text:
+                            logging.info(f"Agent final response: {final_response_text}")
+                        else:
+                            logging.warning("Could not find assistant text content in final history.")
+                    except Exception as log_e:
+                        logging.error(f"Error trying to log final agent response: {log_e}")
 
             logging.info("MCP servers stopped.")
         except Exception as e:
