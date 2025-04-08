@@ -1,4 +1,8 @@
+import json
 import logging
+import os
+import platform
+import subprocess
 from datetime import datetime
 
 from textual import on, work
@@ -11,6 +15,23 @@ from pydantic_ai.mcp import MCPServerStdio
 
 # Define a system prompt
 SYSTEM = """You are a helpful AI assistant."""
+CONFIG_PATH = "mcp_config.json"
+DEFAULT_CONFIG = {
+    "mcpServers": {
+        "run_python": {
+            "command": "deno",
+            "args": [
+                "run",
+                "-N",
+                "-R=node_modules",
+                "-W=node_modules",
+                "--node-modules-dir=auto",
+                "jsr:@pydantic/mcp-run-python",
+                "stdio",
+            ]
+        }
+    }
+}
 
 class Prompt(Markdown):
     """Widget for user prompts"""
@@ -50,33 +71,42 @@ class TerminalApp(App):
         height: auto;
     }
 
-    Label.label { /* Style for the new labels */
-        margin: 1 1 1 2; /* Adjust margins T R B L */
-        width: 15; /* Fixed width for alignment */
+    Label.label {
+        margin: 1 1 1 2; /* T R B L */
+        width: 15;
         text-align: right;
     }
 
-    #system-prompt-input { /* Make prompt input take more space */
+    #system-prompt-input {
         width: 1fr;
     }
 
-    #model-input { /* Make model input take more space */
+    #model-input {
         width: 1fr;
+    }
+
+    #config-buttons {
+        height: auto;
+        margin-top: 1;
+        align: center middle;
     }
     """
 
     def compose(self) -> ComposeResult:
         """Compose the UI layout"""
         yield Header()
-        with Horizontal(): # Model Selection row
+        with Horizontal():
             yield Label("Model:", classes="label")
             yield Input(id="model-input", placeholder="Model (e.g., openai:gpt-4o)")
-        with Horizontal(): # System Prompt row
+        with Horizontal():
             yield Label("System Prompt:", classes="label")
             yield Input(id="system-prompt-input", placeholder="Enter system prompt...")
+        with Horizontal(id="config-buttons"):
+            yield Button("Edit MCP Config", id="edit-config-button")
+            yield Button("Reload MCP Config", id="reload-config-button")
         with VerticalScroll(id="chat-view"):
             yield Response(f"# {self.get_time_greeting()} How can I help?")
-        with Horizontal(): # Input/New Chat row (remains at bottom)
+        with Horizontal():
             yield Button("New Chat", id="new-chat-button")
             yield Input(id="chat-input", placeholder="Ask me anything...")
         yield Footer()
@@ -91,154 +121,235 @@ class TerminalApp(App):
         else:
             return "Good evening!"
 
+    def ensure_config_file(self, path: str = CONFIG_PATH) -> None:
+        """Creates the default config file if it doesn't exist."""
+        if not os.path.exists(path):
+            logging.info(f"Configuration file not found at {path}. Creating default.")
+            try:
+                with open(path, 'w') as f:
+                    json.dump(DEFAULT_CONFIG, f, indent=2)
+                logging.info(f"Default configuration file created at {path}.")
+            except Exception as e:
+                logging.error(f"Failed to create default configuration file at {path}: {e}")
+
+    def load_mcp_servers_from_config(self, path: str = CONFIG_PATH) -> list[MCPServerStdio]:
+        """Loads MCP server configurations from the JSON file."""
+        servers = []
+        try:
+            with open(path, 'r') as f:
+                config_data = json.load(f)
+
+            mcp_servers_config = config_data.get("mcpServers", {})
+            if not mcp_servers_config:
+                logging.warning(f"No 'mcpServers' found or empty in {path}. No servers loaded.")
+                return []
+
+            for server_name, server_details in mcp_servers_config.items():
+                command = server_details.get("command")
+                args = server_details.get("args")
+                env = server_details.get("env")
+                if command and isinstance(args, list):
+                    log_msg = f"Loading MCP server '{server_name}' with command '{command}', args {args}"
+                    if env is not None:
+                         log_msg += f", and env {env}"
+                    logging.info(log_msg)
+                    servers.append(MCPServerStdio(command, args=args, env=env))
+                else:
+                    logging.warning(f"Skipping invalid config for server '{server_name}' in {path}.")
+
+        except FileNotFoundError:
+            logging.error(f"Configuration file not found at {path}. Cannot load servers.")
+            self.ensure_config_file(path)
+            return self.load_mcp_servers_from_config(path) # Try loading again
+        except json.JSONDecodeError as e:
+            logging.error(f"Error decoding JSON from {path}: {e}.")
+            self.query_one("#chat-view").mount(Markdown(f"*Error loading MCP config: Invalid JSON in {path}*"))
+        except Exception as e:
+            logging.error(f"An unexpected error occurred while loading configuration from {path}: {e}")
+            self.query_one("#chat-view").mount(Markdown(f"*Error loading MCP config: {e}*"))
+
+        return servers
+
     def on_mount(self) -> None:
         """Initialize the agent and MCP server on app mount"""
-        # Define the MCP server for Python code execution
-        run_python_server = MCPServerStdio(
-            'deno',
-            args=[
-                'run',
-                '-N',
-                '-R=node_modules',
-                '-W=node_modules',
-                '--node-modules-dir=auto',
-                'jsr:@pydantic/mcp-run-python',
-                'stdio',
-            ]
-        )
-        self.servers = [run_python_server]
-        # Store the model identifier string
+        self.ensure_config_file()
+        self.servers = self.load_mcp_servers_from_config()
         self.model_identifier = "openai:gpt-4o"
-        # Store the system prompt
-        self.system_prompt = SYSTEM # Use the constant defined earlier
-        # Initialize the model input with the default
+        self.system_prompt = SYSTEM
         self.query_one("#model-input", Input).value = self.model_identifier
-        # Initialize the system prompt input with the default
         self.query_one("#system-prompt-input", Input).value = self.system_prompt
-        # Create the agent with the MCP server
         self.initialize_agent()
-        # Initialize message history
         self.message_history = []
-        # Set focus to the main chat input
         self.query_one("#chat-input", Input).focus()
 
     def initialize_agent(self) -> None:
-        """Initializes or re-initializes the agent with the current model identifier."""
-        logging.info(f"Initializing agent with model: {self.model_identifier} and prompt: '{self.system_prompt[:50]}...'") # Log truncated prompt
+        """Initializes or re-initializes the agent."""
+        server_count = len(self.servers)
+        logging.info(f"Initializing agent with model: {self.model_identifier}, {server_count} MCP servers, prompt: '{self.system_prompt[:50]}...'")
         try:
             self.agent = Agent(self.model_identifier, system_prompt=self.system_prompt, mcp_servers=self.servers)
-            logging.info(f"Agent initialized successfully with {self.model_identifier}")
+            logging.info("Agent initialized successfully.")
         except Exception as e:
             logging.error(f"Failed to initialize agent with {self.model_identifier}: {e}")
-            # Optionally, provide feedback to the user in the UI
-            # For now, we just log the error. The agent might be in an invalid state.
-            # Consider resetting to a default or previous valid model?
+            self.query_one("#chat-view").mount(Markdown(f"*Error initializing Agent: {e}*"))
+            self.agent = None # Agent is not usable
 
     @on(Input.Submitted, "#chat-input")
     async def on_input(self, event: Input.Submitted) -> None:
-        """Handle input submissions from the main chat input"""
+        """Handle input submissions."""
+        if not self.agent:
+            self.query_one("#chat-view").mount(Response("*Agent not initialized. Please check configuration and reload.*"))
+            return
+
         chat_view = self.query_one("#chat-view")
         prompt = event.value
         event.input.clear()
 
-        # Display user prompt
         await chat_view.mount(Prompt(f"**You:** {prompt}"))
 
-        # Create a response widget and anchor it
         await chat_view.mount(response := Response())
         response.anchor()
 
-        # Process the prompt
         self.process_prompt(prompt, response)
         logging.info(f"Input submitted: {prompt}")
 
     @work(thread=True)
     async def process_prompt(self, prompt: str, response: Response) -> None:
         """Process the prompt with the agent and update the response"""
+        if not self.agent:
+            self.call_from_thread(response.update, "**Error:** Agent not initialized.")
+            return
+
         logging.info(f"Processing prompt: {prompt}")
-        # Use the model identifier for the prefix
         response_content = f"**{self.model_identifier}:** "
         self.call_from_thread(response.update, response_content)
 
-        # Use message history and stream the response within MCP context
         try:
             async with self.agent.run_mcp_servers():
                 logging.info("MCP servers started.")
-                # Stream the response using async context manager, passing history
                 async with self.agent.run_stream(prompt, message_history=self.message_history) as run_result:
                     logging.info("Agent stream started.")
                     async for accumulated_chunk in run_result.stream():
                         response_content = f"**{self.model_identifier}:** {accumulated_chunk}"
-                        logging.info(f"Updating response widget with: {response_content!r}")
                         self.call_from_thread(response.update, response_content)
 
-                    # Update message history after the stream completes
                     self.message_history = run_result.all_messages()
                     logging.info(f"Message history updated. Length: {len(self.message_history)}")
+                    # Log the final response from the agent
+                    if self.message_history:
+                         final_response_message = next((msg for msg in reversed(self.message_history) if msg.get('role') == 'assistant'), None)
+                         if final_response_message:
+                             logging.info(f"Agent final response: {final_response_message.get('content')}")
+                         else:
+                              logging.warning("Could not find assistant message in final history to log.")
+                    else:
+                        logging.warning("Message history is empty after stream completion.")
 
             logging.info("MCP servers stopped.")
         except Exception as e:
             logging.exception(f"Error during prompt processing: {e}")
-            self.call_from_thread(response.update, f"{response_content}\n\n**Error:** {e}")
+            # Pass error message without newline characters in the f-string directly
+            error_message = f"{response_content} -- **Error:** {e}"
+            self.call_from_thread(response.update, error_message)
 
-        # Final display state is handled within the loop's last update
-        logging.debug(f"Final response content after history update: {response_content}")
+        logging.debug("Finished processing prompt.")
 
     @on(Input.Submitted, "#model-input")
     def on_model_input_submitted(self, event: Input.Submitted) -> None:
-        """Handle the model input submission."""
+        """Handle model input submission."""
         new_model_identifier = event.value
         if new_model_identifier and new_model_identifier != self.model_identifier:
             self.model_identifier = new_model_identifier
+            # Corrected f-string: removed trailing backslash
             logging.info(f"Model identifier changed to: {self.model_identifier}")
-            # Re-initialize the agent with the new model
             self.initialize_agent()
-            self.query_one("#chat-view").mount(Markdown(f"*Model set to **{self.model_identifier}**.*"))
-            self.query_one("#chat-input").focus() # Focus main input
+            if self.agent:
+                self.query_one("#chat-view").mount(Markdown(f"*Model set to **{self.model_identifier}**.*"))
+            self.query_one("#chat-input").focus()
         elif not new_model_identifier:
             logging.warning("Model input submitted empty.")
-        else:
+        else: # Re-add the previously deleted else block
             logging.info("Model input submitted, but model identifier is unchanged.")
 
     @on(Input.Submitted, "#system-prompt-input")
     def on_system_prompt_input_submitted(self, event: Input.Submitted) -> None:
-        """Handle the system prompt input submission."""
+        """Handle system prompt input submission."""
         new_prompt = event.value
         if new_prompt != self.system_prompt:
             self.system_prompt = new_prompt
             logging.info(f"System prompt updated to: '{self.system_prompt[:50]}...'")
-            # Re-initialize the agent with the new prompt
             self.initialize_agent()
-            self.query_one("#chat-view").mount(Markdown("*System prompt updated.*"))
-            self.query_one("#chat-input").focus() # Focus main input
+            if self.agent:
+                self.query_one("#chat-view").mount(Markdown("*System prompt updated.*"))
+            self.query_one("#chat-input").focus()
         else:
             logging.info("System prompt submitted, but prompt is unchanged.")
 
     @on(Button.Pressed, "#new-chat-button")
     async def on_new_chat_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle the 'New Chat' button press."""
+        """Handle 'New Chat' button press."""
         logging.info("'New Chat' button pressed. Clearing history and display.")
-        # Clear the message history
         self.message_history = []
 
-        # Clear the chat view
         chat_view = self.query_one("#chat-view")
         await chat_view.remove_children()
 
-        # Add the initial greeting back
         await chat_view.mount(Response(f"# {self.get_time_greeting()} How can I help?"))
 
-        # Focus the input again
-        self.query_one(Input).focus()
+        self.query_one("#chat-input", Input).focus()
+
+    @on(Button.Pressed, "#edit-config-button")
+    def on_edit_config_button_pressed(self, event: Button.Pressed) -> None:
+        """Open the MCP configuration file in the default editor."""
+        logging.info(f"Attempting to open MCP config file: {CONFIG_PATH}")
+        try:
+            system = platform.system()
+            if system == "Windows":
+                os.startfile(CONFIG_PATH)
+            elif system == "Darwin": # macOS
+                subprocess.run(["open", CONFIG_PATH], check=True)
+            else: # Linux and other UNIX-like
+                subprocess.run(["xdg-open", CONFIG_PATH], check=True)
+            logging.info(f"Opened {CONFIG_PATH} for editing.")
+            self.query_one("#chat-view").mount(Markdown(f"*Opened `{CONFIG_PATH}` for editing. Press 'Reload MCP Config' after saving.*"))
+        except FileNotFoundError:
+             logging.error(f"Config file {CONFIG_PATH} not found.")
+             self.query_one("#chat-view").mount(Markdown(f"*Error: Config file `{CONFIG_PATH}` not found.*"))
+        except Exception as e:
+            logging.error(f"Failed to open config file {CONFIG_PATH}: {e}")
+            self.query_one("#chat-view").mount(Markdown(f"*Error opening `{CONFIG_PATH}`: {e}*"))
+        self.query_one("#chat-input", Input).focus()
+
+    @on(Button.Pressed, "#reload-config-button")
+    def on_reload_config_button_pressed(self, event: Button.Pressed) -> None:
+        """Reload MCP server configurations and re-initialize the agent."""
+        logging.info("Reloading MCP configuration...")
+        self.servers = self.load_mcp_servers_from_config()
+        self.initialize_agent()
+        if self.agent:
+            server_names = []
+            try:
+                 with open(CONFIG_PATH, 'r') as f:
+                    config_data = json.load(f)
+                    server_names = list(config_data.get("mcpServers", {}).keys())
+            except Exception as e:
+                 logging.warning(f"Could not read server names from config during reload: {e}")
+
+            self.query_one("#chat-view").mount(Markdown(f"*MCP Configuration reloaded. Servers: {', '.join(server_names) or 'None'}*"))
+            logging.info(f"MCP configuration reloaded. Servers: {server_names}")
+        else:
+             self.query_one("#chat-view").mount(Markdown("*MCP Config reloaded, but agent initialization failed. Check logs.*"))
+             logging.error("MCP configuration reloaded, but agent initialization failed.")
+
+        self.query_one("#chat-input", Input).focus()
 
 def main():
     """Entry point for the application."""
-    # Configure logging
     logging.basicConfig(
-        level=logging.INFO,  # Changed from DEBUG to INFO
+        level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(threadName)s - %(message)s',
-        filename='app.log',  # Log to a file
-        filemode='w'  # Overwrite the log file each time
+        filename='app.log',
+        filemode='w'
     )
     logging.info("Application starting.")
     app = TerminalApp()

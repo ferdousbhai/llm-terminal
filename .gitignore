@@ -6,3 +6,5 @@ wheels/
 *.egg-info
 .venv
 app.log
+node_modules
+.DS_Store
