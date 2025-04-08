@@ -14,7 +14,7 @@ authors = [
 ]
 dependencies = [
     "textual",
-    "pydantic-ai-slim[mcp,openai]",
+    "pydantic-ai-slim[anthropic,cohere,groq,mcp,openai]",
     "openai",
     "ruff",
     "ipykernel>=6.29.5",
