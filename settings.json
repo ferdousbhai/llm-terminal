@@ -1,0 +1,4 @@
+{
+  "model_identifier": "anthropic:claude-3-7-sonnet-latest",
+  "system_prompt": "You are a helpful AI assistant."
+}

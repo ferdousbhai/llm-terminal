@@ -4,6 +4,7 @@ import os
 import platform
 import subprocess
 from datetime import datetime
+from logging import FileHandler
 
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -15,7 +16,8 @@ from pydantic_ai.mcp import MCPServerStdio
 
 # Define a system prompt
 SYSTEM = """You are a helpful AI assistant."""
-CONFIG_PATH = "mcp_config.json"
+MCP_CONFIG_PATH = "mcp_config.json"
+SETTINGS_PATH = "settings.json" # New settings file path
 DEFAULT_CONFIG = {
     "mcpServers": {
         "run_python": {
@@ -31,6 +33,10 @@ DEFAULT_CONFIG = {
             ]
         }
     }
+}
+DEFAULT_SETTINGS = { # New default settings
+    "model_identifier": "openai:gpt-4o",
+    "system_prompt": SYSTEM
 }
 
 class Prompt(Markdown):
@@ -121,7 +127,7 @@ class TerminalApp(App):
         else:
             return "Good evening!"
 
-    def ensure_config_file(self, path: str = CONFIG_PATH) -> None:
+    def ensure_config_file(self, path: str = MCP_CONFIG_PATH) -> None:
         """Creates the default config file if it doesn't exist."""
         if not os.path.exists(path):
             logging.info(f"Configuration file not found at {path}. Creating default.")
@@ -132,7 +138,7 @@ class TerminalApp(App):
             except Exception as e:
                 logging.error(f"Failed to create default configuration file at {path}: {e}")
 
-    def load_mcp_servers_from_config(self, path: str = CONFIG_PATH) -> list[MCPServerStdio]:
+    def load_mcp_servers_from_config(self, path: str = MCP_CONFIG_PATH) -> list[MCPServerStdio]:
         """Loads MCP server configurations from the JSON file."""
         servers = []
         try:
@@ -170,14 +176,56 @@ class TerminalApp(App):
 
         return servers
 
+    def load_settings(self, path: str = SETTINGS_PATH) -> dict:
+        """Loads application settings from the JSON file."""
+        if not os.path.exists(path):
+            logging.info(f"Settings file not found at {path}. Using defaults.")
+            return DEFAULT_SETTINGS.copy() # Return a copy
+
+        try:
+            with open(path, 'r') as f:
+                settings_data = json.load(f)
+                # Validate or provide defaults for missing keys
+                loaded_settings = {
+                    "model_identifier": settings_data.get("model_identifier", DEFAULT_SETTINGS["model_identifier"]),
+                    "system_prompt": settings_data.get("system_prompt", DEFAULT_SETTINGS["system_prompt"])
+                }
+                logging.info(f"Loaded settings from {path}: {loaded_settings}")
+                return loaded_settings
+        except json.JSONDecodeError as e:
+            logging.error(f"Error decoding JSON from {path}: {e}. Using default settings.")
+            return DEFAULT_SETTINGS.copy()
+        except Exception as e:
+            logging.error(f"An unexpected error occurred while loading settings from {path}: {e}. Using default settings.")
+            return DEFAULT_SETTINGS.copy()
+
+    def save_settings(self, path: str = SETTINGS_PATH) -> None:
+        """Saves the current settings to the JSON file."""
+        settings_to_save = {
+            "model_identifier": self.model_identifier,
+            "system_prompt": self.system_prompt
+        }
+        try:
+            with open(path, 'w') as f:
+                json.dump(settings_to_save, f, indent=2)
+            logging.info(f"Settings saved to {path}: {settings_to_save}")
+        except Exception as e:
+            logging.error(f"Failed to save settings to {path}: {e}")
+            # Optionally notify the user in the UI
+            self.query_one("#chat-view").mount(Markdown(f"*Error saving settings to `{path}`: {e}*"))
+
     def on_mount(self) -> None:
         """Initialize the agent and MCP server on app mount"""
         self.ensure_config_file()
         self.servers = self.load_mcp_servers_from_config()
-        self.model_identifier = "openai:gpt-4o"
-        self.system_prompt = SYSTEM
+        # Load settings
+        loaded_settings = self.load_settings()
+        self.model_identifier = loaded_settings["model_identifier"]
+        self.system_prompt = loaded_settings["system_prompt"]
+        # Update UI
         self.query_one("#model-input", Input).value = self.model_identifier
         self.query_one("#system-prompt-input", Input).value = self.system_prompt
+        # Initialize agent and history
         self.initialize_agent()
         self.message_history = []
         self.query_one("#chat-input", Input).focus()
@@ -279,6 +327,7 @@ class TerminalApp(App):
             if self.agent:
                 self.query_one("#chat-view").mount(Markdown(f"*Model set to **{self.model_identifier}**.*"))
             self.query_one("#chat-input").focus()
+            self.save_settings() # Save settings after successful change
         elif not new_model_identifier:
             logging.warning("Model input submitted empty.")
         else: # Re-add the previously deleted else block
@@ -295,6 +344,7 @@ class TerminalApp(App):
             if self.agent:
                 self.query_one("#chat-view").mount(Markdown("*System prompt updated.*"))
             self.query_one("#chat-input").focus()
+            self.save_settings() # Save settings after successful change
         else:
             logging.info("System prompt submitted, but prompt is unchanged.")
 
@@ -314,23 +364,23 @@ class TerminalApp(App):
     @on(Button.Pressed, "#edit-config-button")
     def on_edit_config_button_pressed(self, event: Button.Pressed) -> None:
         """Open the MCP configuration file in the default editor."""
-        logging.info(f"Attempting to open MCP config file: {CONFIG_PATH}")
+        logging.info(f"Attempting to open MCP config file: {MCP_CONFIG_PATH}")
         try:
             system = platform.system()
             if system == "Windows":
-                os.startfile(CONFIG_PATH)
+                os.startfile(MCP_CONFIG_PATH)
             elif system == "Darwin": # macOS
-                subprocess.run(["open", CONFIG_PATH], check=True)
+                subprocess.run(["open", MCP_CONFIG_PATH], check=True)
             else: # Linux and other UNIX-like
-                subprocess.run(["xdg-open", CONFIG_PATH], check=True)
-            logging.info(f"Opened {CONFIG_PATH} for editing.")
-            self.query_one("#chat-view").mount(Markdown(f"*Opened `{CONFIG_PATH}` for editing. Press 'Reload MCP Config' after saving.*"))
+                subprocess.run(["xdg-open", MCP_CONFIG_PATH], check=True)
+            logging.info(f"Opened {MCP_CONFIG_PATH} for editing.")
+            self.query_one("#chat-view").mount(Markdown(f"*Opened `{MCP_CONFIG_PATH}` for editing. Press 'Reload MCP Config' after saving.*"))
         except FileNotFoundError:
-             logging.error(f"Config file {CONFIG_PATH} not found.")
-             self.query_one("#chat-view").mount(Markdown(f"*Error: Config file `{CONFIG_PATH}` not found.*"))
+             logging.error(f"Config file {MCP_CONFIG_PATH} not found.")
+             self.query_one("#chat-view").mount(Markdown(f"*Error: Config file `{MCP_CONFIG_PATH}` not found.*"))
         except Exception as e:
-            logging.error(f"Failed to open config file {CONFIG_PATH}: {e}")
-            self.query_one("#chat-view").mount(Markdown(f"*Error opening `{CONFIG_PATH}`: {e}*"))
+            logging.error(f"Failed to open config file {MCP_CONFIG_PATH}: {e}")
+            self.query_one("#chat-view").mount(Markdown(f"*Error opening `{MCP_CONFIG_PATH}`: {e}*"))
         self.query_one("#chat-input", Input).focus()
 
     @on(Button.Pressed, "#reload-config-button")
@@ -342,7 +392,7 @@ class TerminalApp(App):
         if self.agent:
             server_names = []
             try:
-                 with open(CONFIG_PATH, 'r') as f:
+                 with open(MCP_CONFIG_PATH, 'r') as f:
                     config_data = json.load(f)
                     server_names = list(config_data.get("mcpServers", {}).keys())
             except Exception as e:
@@ -358,12 +408,16 @@ class TerminalApp(App):
 
 def main():
     """Entry point for the application."""
+    # Configure logging to ONLY go to the file
+    log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(threadName)s - %(message)s')
+    log_handler = FileHandler('app.log', mode='w') # Create file handler
+    log_handler.setFormatter(log_formatter)
+
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(threadName)s - %(message)s',
-        filename='app.log',
-        filemode='w'
+        handlers=[log_handler] # Use 'handlers' instead of 'filename'/'filemode' to prevent console output
     )
+
     logging.info("Application starting.")
     app = TerminalApp()
     app.run()
