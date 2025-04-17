@@ -8,3 +8,4 @@ wheels/
 app.log
 node_modules
 .DS_Store
+mcp_config.json
