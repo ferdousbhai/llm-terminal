@@ -19,6 +19,7 @@ dependencies = [
     "ruff",
     "ipykernel>=6.29.5",
     "twine>=6.1.0",
+    "cohere>=5.14.2",
 ]
 
 [project.scripts]

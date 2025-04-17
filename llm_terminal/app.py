@@ -1,10 +1,10 @@
-import json
 import logging
 import os
 import platform
 import subprocess
 from datetime import datetime
 from logging import FileHandler
+import sys
 
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -12,32 +12,29 @@ from textual.widgets import Header, Input, Footer, Markdown, Button, Label
 from textual.containers import VerticalScroll, Horizontal
 
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import AgentRunError, UserError
+from pydantic_ai.messages import (
+    ModelResponse,
+    TextPart,
+    PartDeltaEvent,
+    TextPartDelta,
+    ToolCallPartDelta,
+    PartStartEvent,
+    ToolCallPart,
+    FunctionToolCallEvent,
+    FunctionToolResultEvent,
+    FinalResultEvent,
+)
 from pydantic_ai.mcp import MCPServerStdio
 
-# Define a system prompt
-SYSTEM = """You are a helpful AI assistant."""
-MCP_CONFIG_PATH = "mcp_config.json"
-SETTINGS_PATH = "settings.json" # New settings file path
-DEFAULT_CONFIG = {
-    "mcpServers": {
-        "run_python": {
-            "command": "deno",
-            "args": [
-                "run",
-                "-N",
-                "-R=node_modules",
-                "-W=node_modules",
-                "--node-modules-dir=auto",
-                "jsr:@pydantic/mcp-run-python",
-                "stdio",
-            ]
-        }
-    }
-}
-DEFAULT_SETTINGS = { # New default settings
-    "model_identifier": "openai:gpt-4o",
-    "system_prompt": SYSTEM
-}
+from .config import (
+    MCP_CONFIG_PATH,
+    SETTINGS_PATH,
+    ensure_config_file,
+    load_mcp_servers_from_config,
+    load_settings,
+    save_settings
+)
 
 class Prompt(Markdown):
     """Widget for user prompts"""
@@ -50,7 +47,6 @@ class Response(Markdown):
 class TerminalApp(App):
     """A terminal-based chat interface for PydanticAI with MCP integration"""
     AUTO_FOCUS = "Input"
-
     CSS = """
     Prompt {
         background: $primary 10%;
@@ -97,6 +93,8 @@ class TerminalApp(App):
         align: center middle;
     }
     """
+    mcp_server_configs: dict[str, MCPServerStdio]
+    agent: Agent | None = None
 
     def compose(self) -> ComposeResult:
         """Compose the UI layout"""
@@ -127,301 +125,298 @@ class TerminalApp(App):
         else:
             return "Good evening!"
 
-    def ensure_config_file(self, path: str = MCP_CONFIG_PATH) -> None:
-        """Creates the default config file if it doesn't exist."""
-        if not os.path.exists(path):
-            logging.info(f"Configuration file not found at {path}. Creating default.")
-            try:
-                with open(path, 'w') as f:
-                    json.dump(DEFAULT_CONFIG, f, indent=2)
-                logging.info(f"Default configuration file created at {path}.")
-            except Exception as e:
-                logging.error(f"Failed to create default configuration file at {path}: {e}")
-
-    def load_mcp_servers_from_config(self, path: str = MCP_CONFIG_PATH) -> list[MCPServerStdio]:
-        """Loads MCP server configurations from the JSON file."""
-        servers = []
-        try:
-            with open(path, 'r') as f:
-                config_data = json.load(f)
-
-            mcp_servers_config = config_data.get("mcpServers", {})
-            if not mcp_servers_config:
-                logging.warning(f"No 'mcpServers' found or empty in {path}. No servers loaded.")
-                return []
-
-            for server_name, server_details in mcp_servers_config.items():
-                command = server_details.get("command")
-                args = server_details.get("args")
-                env = server_details.get("env")
-                if command and isinstance(args, list):
-                    log_msg = f"Loading MCP server '{server_name}' with command '{command}', args {args}"
-                    if env is not None:
-                         log_msg += f", and env {env}"
-                    logging.info(log_msg)
-                    servers.append(MCPServerStdio(command, args=args, env=env))
-                else:
-                    logging.warning(f"Skipping invalid config for server '{server_name}' in {path}.")
-
-        except FileNotFoundError:
-            logging.error(f"Configuration file not found at {path}. Cannot load servers.")
-            self.ensure_config_file(path)
-            return self.load_mcp_servers_from_config(path) # Try loading again
-        except json.JSONDecodeError as e:
-            logging.error(f"Error decoding JSON from {path}: {e}.")
-            self.query_one("#chat-view").mount(Markdown(f"*Error loading MCP config: Invalid JSON in {path}*"))
-        except Exception as e:
-            logging.error(f"An unexpected error occurred while loading configuration from {path}: {e}")
-            self.query_one("#chat-view").mount(Markdown(f"*Error loading MCP config: {e}*"))
-
-        return servers
-
-    def load_settings(self, path: str = SETTINGS_PATH) -> dict:
-        """Loads application settings from the JSON file."""
-        if not os.path.exists(path):
-            logging.info(f"Settings file not found at {path}. Using defaults.")
-            return DEFAULT_SETTINGS.copy() # Return a copy
-
-        try:
-            with open(path, 'r') as f:
-                settings_data = json.load(f)
-                # Validate or provide defaults for missing keys
-                loaded_settings = {
-                    "model_identifier": settings_data.get("model_identifier", DEFAULT_SETTINGS["model_identifier"]),
-                    "system_prompt": settings_data.get("system_prompt", DEFAULT_SETTINGS["system_prompt"])
-                }
-                logging.info(f"Loaded settings from {path}: {loaded_settings}")
-                return loaded_settings
-        except json.JSONDecodeError as e:
-            logging.error(f"Error decoding JSON from {path}: {e}. Using default settings.")
-            return DEFAULT_SETTINGS.copy()
-        except Exception as e:
-            logging.error(f"An unexpected error occurred while loading settings from {path}: {e}. Using default settings.")
-            return DEFAULT_SETTINGS.copy()
-
-    def save_settings(self, path: str = SETTINGS_PATH) -> None:
-        """Saves the current settings to the JSON file."""
-        settings_to_save = {
-            "model_identifier": self.model_identifier,
-            "system_prompt": self.system_prompt
-        }
-        try:
-            with open(path, 'w') as f:
-                json.dump(settings_to_save, f, indent=2)
-            logging.info(f"Settings saved to {path}: {settings_to_save}")
-        except Exception as e:
-            logging.error(f"Failed to save settings to {path}: {e}")
-            # Optionally notify the user in the UI
-            self.query_one("#chat-view").mount(Markdown(f"*Error saving settings to `{path}`: {e}*"))
-
     def on_mount(self) -> None:
-        """Initialize the agent and MCP server on app mount"""
-        self.ensure_config_file()
-        self.servers = self.load_mcp_servers_from_config()
-        # Load settings
-        loaded_settings = self.load_settings()
+        """Initialize the app, load configs, and settings."""
+        ensure_config_file()
+        self.mcp_server_configs = load_mcp_servers_from_config()
+        logging.info(f"Loaded {len(self.mcp_server_configs)} MCP server configurations.")
+
+        loaded_settings = load_settings()
         self.model_identifier = loaded_settings["model_identifier"]
         self.system_prompt = loaded_settings["system_prompt"]
-        # Update UI
+
         self.query_one("#model-input", Input).value = self.model_identifier
         self.query_one("#system-prompt-input", Input).value = self.system_prompt
-        # Initialize agent and history
-        self.initialize_agent()
+
         self.message_history = []
+
+        self._initialize_agent()
+
         self.query_one("#chat-input", Input).focus()
 
-    def initialize_agent(self) -> None:
-        """Initializes or re-initializes the agent."""
-        server_count = len(self.servers)
-        logging.info(f"Initializing agent with model: {self.model_identifier}, {server_count} MCP servers, prompt: '{self.system_prompt[:50]}...'")
+    def _initialize_agent(self) -> None:
+        """Initializes or re-initializes the Agent instance."""
+        logging.info(f"Initializing agent with model '{self.model_identifier}' and {len(self.mcp_server_configs)} servers.")
+        mcp_servers: list[MCPServerStdio] = list(self.mcp_server_configs.values())
         try:
-            self.agent = Agent(self.model_identifier, system_prompt=self.system_prompt, mcp_servers=self.servers)
+            self.agent = Agent(
+                self.model_identifier,
+                system_prompt=self.system_prompt,
+                mcp_servers=mcp_servers
+            )
             logging.info("Agent initialized successfully.")
+        except (UserError, AgentRunError) as e:
+            logging.exception(f"Failed to initialize Agent with {self.model_identifier}: {e}")
+            self.query_one("#chat-view").mount(Response(f"*Error initializing Agent: {e}. Please check model identifier and configuration.*"))
         except Exception as e:
-            logging.error(f"Failed to initialize agent with {self.model_identifier}: {e}")
-            self.query_one("#chat-view").mount(Markdown(f"*Error initializing Agent: {e}*"))
-            self.agent = None # Agent is not usable
+            logging.exception(f"An unexpected error occurred during agent initialization: {e}")
+            self.query_one("#chat-view").mount(Response(f"*Unexpected error initializing Agent: {e}.*"))
 
     @on(Input.Submitted, "#chat-input")
     async def on_input(self, event: Input.Submitted) -> None:
-        """Handle input submissions."""
-        if not self.agent:
-            self.query_one("#chat-view").mount(Response("*Agent not initialized. Please check configuration and reload.*"))
-            return
-
+        """Handle input submissions, select servers, and run a dynamic agent."""
         chat_view = self.query_one("#chat-view")
         prompt = event.value
         event.input.clear()
 
         await chat_view.mount(Prompt(f"**You:** {prompt}"))
-
         await chat_view.mount(response := Response())
         response.anchor()
 
         self.process_prompt(prompt, response)
-        logging.info(f"Input submitted: {prompt}")
 
     @work(thread=True)
     async def process_prompt(self, prompt: str, response: Response) -> None:
-        """Process the prompt with the agent and update the response"""
-        if not self.agent:
-            self.call_from_thread(response.update, "**Error:** Agent not initialized.")
+        """Process the prompt: set up agent run and handle results."""
+        logging.info(f"Processing prompt: {prompt}")
+        initial_response_content = f"**{self.model_identifier}:** "
+        self.call_from_thread(response.update, initial_response_content)
+
+        if self.agent is None:
+            logging.error("Agent is not initialized. Cannot process prompt.")
+            error_message = f"{initial_response_content} -- **Error: Agent not initialized. Check configuration and logs.**"
+            self.call_from_thread(response.update, error_message)
             return
 
-        logging.info(f"Processing prompt: {prompt}")
-        response_content = f"**{self.model_identifier}:** "
-        self.call_from_thread(response.update, response_content)
+        mcp_servers = list(self.mcp_server_configs.values())
+        last_displayed_content = initial_response_content
 
         try:
             async with self.agent.run_mcp_servers():
-                logging.info("MCP servers started.")
+                logging.info(f"MCP servers ({len(mcp_servers)}) started for agent.")
                 async with self.agent.run_stream(prompt, message_history=self.message_history) as run_result:
                     logging.info("Agent stream started.")
-                    async for accumulated_chunk in run_result.stream():
-                        response_content = f"**{self.model_identifier}:** {accumulated_chunk}"
-                        self.call_from_thread(response.update, response_content)
 
+                    last_displayed_content = await self._handle_stream_events(
+                        run_result.stream(),
+                        response,
+                        initial_response_content
+                    )
+
+                    logging.info("Stream processing loop finished.")
                     self.message_history = run_result.all_messages()
+
+                    try:
+                        history_repr = repr(self.message_history)
+                        logging.debug(f"Message history immediately after stream end ({len(self.message_history)} messages):\n{history_repr}")
+                    except Exception as hist_log_e:
+                        logging.error(f"Error logging message history representation: {hist_log_e}")
+
                     logging.info(f"Message history updated. Length: {len(self.message_history)}")
 
-                    # Log the final response from the agent
-                    final_response_text = None
-                    try:
-                        for msg in reversed(self.message_history):
-                            # Check if it's a ModelResponse likely containing the final text
-                            if hasattr(msg, 'kind') and msg.kind == 'response' and hasattr(msg, 'parts'):
-                                for part in msg.parts:
-                                    # Find a part with content that isn't a known non-text type (like ToolCallPart)
-                                    # Heuristic: check for 'content' and lack of 'tool_call_id'
-                                    if hasattr(part, 'content') and not hasattr(part, 'tool_call_id'):
-                                        final_response_text = part.content
-                                        break # Found the text part
-                                if final_response_text is not None:
-                                    break # Found the text in the latest relevant message
+                    await self._finalize_response(response, last_displayed_content)
 
-                        if final_response_text:
-                            logging.info(f"Agent final response: {final_response_text}")
-                        else:
-                            logging.warning("Could not find assistant text content in final history.")
-                    except Exception as log_e:
-                        logging.error(f"Error trying to log final agent response: {log_e}")
+            logging.info(f"MCP servers ({len(mcp_servers)}) stopped for agent.")
 
-            logging.info("MCP servers stopped.")
         except Exception as e:
-            logging.exception(f"Error during prompt processing: {e}")
-            # Pass error message without newline characters in the f-string directly
-            error_message = f"{response_content} -- **Error:** {e}"
+            logging.exception(f"Error during agent prompt processing: {e}")
+            error_message = f"{last_displayed_content} -- **Error:** {e}"
             self.call_from_thread(response.update, error_message)
 
-        logging.debug("Finished processing prompt.")
+        logging.debug("Finished processing prompt with agent.")
 
-    @on(Input.Submitted, "#model-input")
-    def on_model_input_submitted(self, event: Input.Submitted) -> None:
-        """Handle model input submission."""
-        new_model_identifier = event.value
-        if new_model_identifier and new_model_identifier != self.model_identifier:
-            self.model_identifier = new_model_identifier
-            # Corrected f-string: removed trailing backslash
-            logging.info(f"Model identifier changed to: {self.model_identifier}")
-            self.initialize_agent()
-            if self.agent:
-                self.query_one("#chat-view").mount(Markdown(f"*Model set to **{self.model_identifier}**.*"))
-            self.query_one("#chat-input").focus()
-            self.save_settings() # Save settings after successful change
-        elif not new_model_identifier:
-            logging.warning("Model input submitted empty.")
-        else: # Re-add the previously deleted else block
-            logging.info("Model input submitted, but model identifier is unchanged.")
+    async def _handle_stream_events(self, stream, response: Response, initial_content: str) -> str:
+        """Iterates through stream events, updates UI, and returns the last displayed content."""
+        current_text_response = ""
+        tool_call_in_progress_message = ""
+        last_displayed_content = initial_content
+        response_prefix = f"**{self.model_identifier}:** "
 
-    @on(Input.Submitted, "#system-prompt-input")
-    def on_system_prompt_input_submitted(self, event: Input.Submitted) -> None:
-        """Handle system prompt input submission."""
-        new_prompt = event.value
-        if new_prompt != self.system_prompt:
-            self.system_prompt = new_prompt
-            logging.info(f"System prompt updated to: '{self.system_prompt[:50]}...'")
-            self.initialize_agent()
-            if self.agent:
-                self.query_one("#chat-view").mount(Markdown("*System prompt updated.*"))
-            self.query_one("#chat-input").focus()
-            self.save_settings() # Save settings after successful change
-        else:
-            logging.info("System prompt submitted, but prompt is unchanged.")
+        async for event in stream:
+            log_prefix = f"Stream Event Received: Type={type(event).__name__}"
+            log_details = []
 
-    @on(Button.Pressed, "#new-chat-button")
-    async def on_new_chat_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle 'New Chat' button press."""
-        logging.info("'New Chat' button pressed. Clearing history and display.")
-        self.message_history = []
+            content_to_display = last_displayed_content
 
-        chat_view = self.query_one("#chat-view")
-        await chat_view.remove_children()
+            if isinstance(event, PartStartEvent):
+                log_details.append(f"Index={event.index}")
+                log_details.append(f"Part={event.part!r}")
+                if isinstance(event.part, ToolCallPart):
+                    tool_name = event.part.tool_name
+                    tool_call_in_progress_message = f"\n*Assistant is using tool: `{tool_name}`...*"
+                    content_to_display = f"{response_prefix}{current_text_response}{tool_call_in_progress_message}"
+                    logging.info(f"Tool call started: {tool_name}")
 
-        await chat_view.mount(Response(f"# {self.get_time_greeting()} How can I help?"))
+            elif isinstance(event, PartDeltaEvent):
+                log_details.append(f"Index={event.index}")
+                if isinstance(event.delta, TextPartDelta):
+                    log_details.append(f"Delta=TextPartDelta(content_delta={event.delta.content_delta!r})")
+                    current_text_response += event.delta.content_delta
+                    tool_call_in_progress_message = ""
+                    content_to_display = f"{response_prefix}{current_text_response}"
+                elif isinstance(event.delta, ToolCallPartDelta):
+                    log_details.append(f"Delta=ToolCallPartDelta(args_delta={event.delta.args_delta})")
+                    content_to_display = f"{response_prefix}{current_text_response}{tool_call_in_progress_message}"
+                else:
+                    log_details.append(f"Delta={event.delta!r}")
 
+            elif isinstance(event, FunctionToolCallEvent):
+                 log_details.append(f"Part={event.part!r}")
+
+            elif isinstance(event, FunctionToolResultEvent):
+                log_details.append(f"ToolCallID={event.tool_call_id!r}")
+                log_details.append(f"Result={event.result!r}")
+
+            elif isinstance(event, FinalResultEvent):
+                if hasattr(event, 'tool_name'): log_details.append(f"ToolName={event.tool_name!r}")
+                if hasattr(event, 'tool_call_id'): log_details.append(f"ToolCallID={event.tool_call_id!r}")
+                if hasattr(event, 'data'): log_details.append(f"Data={event.data!r}")
+
+            else:
+                 log_details.append(f"EventRepr={event!r}")
+
+            logging.debug(f"{log_prefix} | Details: {{ {', '.join(log_details)} }}")
+
+            if content_to_display != last_displayed_content:
+                self.call_from_thread(response.update, content_to_display)
+                last_displayed_content = content_to_display
+
+        return last_displayed_content
+
+    async def _finalize_response(self, response: Response, last_displayed_content: str) -> None:
+        """Extracts final text from history and updates UI if needed."""
+        final_response_text = None
+        try:
+            for msg in reversed(self.message_history):
+                if isinstance(msg, ModelResponse):
+                    for part in msg.parts:
+                        if isinstance(part, TextPart) and not hasattr(part, 'tool_call_id') and not hasattr(part, 'tool_return_id'):
+                            final_response_text = part.content
+                            break
+                    if final_response_text is not None:
+                        break
+
+            if final_response_text:
+                logging.info(f"Agent final response extracted from history: {final_response_text[:100]}...")
+                final_expected_content = f"**{self.model_identifier}:** {final_response_text}"
+                if final_expected_content != last_displayed_content:
+                    logging.info("Stream ended before final text was fully displayed, performing final UI update.")
+                    self.call_from_thread(response.update, final_expected_content)
+                else:
+                    logging.info("Final text response matches last streamed content.")
+            else:
+                logging.warning("Could not find final assistant text content in history after stream completion.")
+        except Exception as log_e:
+            logging.error(f"Error trying to extract/log final agent response from history: {log_e}")
+
+    def _update_and_restart(self) -> None:
+        """Save settings, reinitialize agent, and focus chat input."""
+        if not save_settings(self.model_identifier, self.system_prompt):
+            self.query_one("#chat-view").mount(Markdown(f"*Error saving settings to `{SETTINGS_PATH}`*"))
+        self._initialize_agent()
         self.query_one("#chat-input", Input).focus()
 
-    @on(Button.Pressed, "#edit-config-button")
-    def on_edit_config_button_pressed(self, event: Button.Pressed) -> None:
-        """Open the MCP configuration file in the default editor."""
-        logging.info(f"Attempting to open MCP config file: {MCP_CONFIG_PATH}")
+    @on(Input.Submitted, "#model-input")
+    @on(Input.Submitted, "#system-prompt-input")
+    def on_settings_change_submitted(self, event: Input.Submitted) -> None:
+        """Handle both model and system-prompt input submissions."""
+        widget_id = event.input.id
+        if widget_id == "model-input":
+            new_model = event.value
+            if new_model and new_model != self.model_identifier:
+                self.model_identifier = new_model
+                logging.info(f"Model identifier changed to: {self.model_identifier}")
+                self.query_one("#chat-view").mount(Markdown(f"*Model set to **{self.model_identifier}**. Re-initializing agent...*"))
+            elif not new_model:
+                logging.warning("Model input submitted empty.")
+                return
+            else:
+                logging.info("Model input submitted, but model identifier is unchanged.")
+                return
+        else:
+            new_prompt = event.value
+            if new_prompt and new_prompt != self.system_prompt:
+                self.system_prompt = new_prompt
+                logging.info(f"System prompt updated to: '{self.system_prompt[:50]}...'")
+                self.query_one("#chat-view").mount(Markdown("*System prompt updated. Re-initializing agent...*"))
+            else:
+                logging.info("System prompt submitted, but prompt is unchanged.")
+                return
+
+        self._update_and_restart()
+
+    @on(Button.Pressed)
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Unified handler for new-chat, edit-config, and reload-config buttons."""
+        btn_id = event.button.id
+        if btn_id == "new-chat-button":
+            logging.info("'New Chat' button pressed. Clearing history and display.")
+            self.message_history = []
+            chat_view = self.query_one("#chat-view")
+            await chat_view.remove_children()
+            await chat_view.mount(Response(f"# {self.get_time_greeting()} How can I help?"))
+        elif btn_id == "edit-config-button":
+            logging.info(f"Opening config file: {MCP_CONFIG_PATH}")
+            self._open_file_in_editor(MCP_CONFIG_PATH)
+        elif btn_id == "reload-config-button":
+            logging.info("Reloading MCP configuration...")
+            self.mcp_server_configs = load_mcp_servers_from_config()
+            server_names = list(self.mcp_server_configs.keys())
+            self._initialize_agent()
+            self._log_to_chat(f"*MCP Configuration reloaded and agent re-initialized. Found {len(server_names)} server configs: {', '.join(server_names) or 'None'}*")
+            logging.info(f"MCP configuration reloaded. Found configs: {server_names}")
+        self._focus_input()
+
+    def _log_to_chat(self, text: str) -> None:
+        """Mount Markdown text to chat view."""
+        self.query_one("#chat-view").mount(Markdown(text))
+
+    def _focus_input(self) -> None:
+        """Set focus back to the chat input."""
+        self.query_one("#chat-input", Input).focus()
+
+    def _open_file_in_editor(self, path: str) -> None:
+        """Open a file in the default system editor, with error handling."""
         try:
             system = platform.system()
             if system == "Windows":
-                os.startfile(MCP_CONFIG_PATH)
-            elif system == "Darwin": # macOS
-                subprocess.run(["open", MCP_CONFIG_PATH], check=True)
-            else: # Linux and other UNIX-like
-                subprocess.run(["xdg-open", MCP_CONFIG_PATH], check=True)
-            logging.info(f"Opened {MCP_CONFIG_PATH} for editing.")
-            self.query_one("#chat-view").mount(Markdown(f"*Opened `{MCP_CONFIG_PATH}` for editing. Press 'Reload MCP Config' after saving.*"))
+                os.startfile(path)
+            elif system == "Darwin":
+                subprocess.run(["open", path], check=True)
+            else:
+                subprocess.run(["xdg-open", path], check=True)
+            self._log_to_chat(f"*Opened `{path}` for editing. Press 'Reload MCP Config' after saving.*")
         except FileNotFoundError:
-             logging.error(f"Config file {MCP_CONFIG_PATH} not found.")
-             self.query_one("#chat-view").mount(Markdown(f"*Error: Config file `{MCP_CONFIG_PATH}` not found.*"))
+            logging.error(f"Config file {path} not found.")
+            self._log_to_chat(f"*Error: Config file `{path}` not found.*")
         except Exception as e:
-            logging.error(f"Failed to open config file {MCP_CONFIG_PATH}: {e}")
-            self.query_one("#chat-view").mount(Markdown(f"*Error opening `{MCP_CONFIG_PATH}`: {e}*"))
-        self.query_one("#chat-input", Input).focus()
-
-    @on(Button.Pressed, "#reload-config-button")
-    def on_reload_config_button_pressed(self, event: Button.Pressed) -> None:
-        """Reload MCP server configurations and re-initialize the agent."""
-        logging.info("Reloading MCP configuration...")
-        self.servers = self.load_mcp_servers_from_config()
-        self.initialize_agent()
-        if self.agent:
-            server_names = []
-            try:
-                 with open(MCP_CONFIG_PATH, 'r') as f:
-                    config_data = json.load(f)
-                    server_names = list(config_data.get("mcpServers", {}).keys())
-            except Exception as e:
-                 logging.warning(f"Could not read server names from config during reload: {e}")
-
-            self.query_one("#chat-view").mount(Markdown(f"*MCP Configuration reloaded. Servers: {', '.join(server_names) or 'None'}*"))
-            logging.info(f"MCP configuration reloaded. Servers: {server_names}")
-        else:
-             self.query_one("#chat-view").mount(Markdown("*MCP Config reloaded, but agent initialization failed. Check logs.*"))
-             logging.error("MCP configuration reloaded, but agent initialization failed.")
-
-        self.query_one("#chat-input", Input).focus()
+            logging.error(f"Failed to open config file {path}: {e}")
+            self._log_to_chat(f"*Error opening `{path}`: {e}*")
 
 def main():
-    """Entry point for the application."""
-    # Configure logging to ONLY go to the file
+    """Synchronous entry point that sets up logging, runs initial async tasks, and starts the app."""
     log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(threadName)s - %(message)s')
-    log_handler = FileHandler('app.log', mode='w') # Create file handler
+    log_handler = FileHandler('app.log', mode='w')
     log_handler.setFormatter(log_formatter)
 
-    logging.basicConfig(
-        level=logging.INFO,
-        handlers=[log_handler] # Use 'handlers' instead of 'filename'/'filemode' to prevent console output
-    )
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
 
-    logging.info("Application starting.")
-    app = TerminalApp()
-    app.run()
-    logging.info("Application finished.")
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
 
-if __name__ == "__main__":
-    main()
+    root_logger.addHandler(log_handler)
+
+    try:
+        logging.info("Starting Textual application.")
+        app = TerminalApp()
+        app.run()
+        logging.info("Application finished.")
+
+    except Exception as e:
+        logging.basicConfig(filename='app.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(threadName)s - %(message)s')
+        logging.exception("Application crashed.")
+        print(f"Application crashed: {e}", file=sys.stderr)
+        sys.exit(1)
+
+# The if __name__ == "__main__": block is ommitted as we are using uv run to start the app

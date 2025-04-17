@@ -1,4 +1,4 @@
 {
-  "model_identifier": "anthropic:claude-3-7-sonnet-latest",
+  "model_identifier": "openai:o4-mini",
   "system_prompt": "You are a helpful AI assistant."
 }

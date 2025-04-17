@@ -828,6 +828,7 @@ name = "llm-terminal"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cohere" },
     { name = "ipykernel" },
     { name = "openai" },
     { name = "pydantic-ai-slim", extra = ["anthropic", "cohere", "groq", "mcp", "openai"] },
@@ -838,6 +839,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cohere", specifier = ">=5.14.2" },
     { name = "ipykernel", specifier = ">=6.29.5" },
     { name = "openai" },
     { name = "pydantic-ai-slim", extras = ["anthropic", "cohere", "groq", "mcp", "openai"] },
