@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llm_terminal"
-version = "0.1.0"
+version = "1.0.0"
 description = "A terminal-based UI for LLMs with PydanticAI and MCP integration"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [
     { name = "Ferdous", email = "ferdous@hey.com" },
