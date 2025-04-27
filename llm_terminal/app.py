@@ -5,36 +5,28 @@ import subprocess
 from datetime import datetime
 from logging import FileHandler
 import sys
+import asyncio
+import threading
+import queue
 
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Input, Footer, Markdown, Button, Label
 from textual.containers import VerticalScroll, Horizontal
+from textual.worker import WorkerState, Worker
 
-from pydantic_ai import Agent
-from pydantic_ai.exceptions import AgentRunError, UserError
-from pydantic_ai.messages import (
-    ModelResponse,
-    TextPart,
-    PartDeltaEvent,
-    TextPartDelta,
-    ToolCallPartDelta,
-    PartStartEvent,
-    ToolCallPart,
-    FunctionToolCallEvent,
-    FunctionToolResultEvent,
-    FinalResultEvent,
-)
-from pydantic_ai.mcp import MCPServerStdio
 
 from .config import (
     MCP_CONFIG_PATH,
     SETTINGS_PATH,
     ensure_config_file,
-    load_mcp_servers_from_config,
     load_settings,
     save_settings
 )
+from .agent_service import AgentService
+
+# Simplified logging setup at module level
+log = logging.getLogger(__name__)
 
 class Prompt(Markdown):
     """Widget for user prompts"""
@@ -48,56 +40,21 @@ class TerminalApp(App):
     """A terminal-based chat interface for PydanticAI with MCP integration"""
     AUTO_FOCUS = "Input"
     CSS = """
-    Prompt {
-        background: $primary 10%;
-        color: $text;
-        margin: 1;
-        margin-right: 8;
-        padding: 1 2 0 2;
-    }
-
-    Response {
-        border: wide $success;
-        background: $success 10%;
-        color: $text;
-        margin: 1;
-        margin-left: 8;
-        padding: 1 2 0 2;
-    }
-
-    #chat-view {  /* Ensure chat view takes available space */
-        height: 1fr;
-    }
-
-    Horizontal { /* Ensure the button/input rows take minimal height */
-        height: auto;
-    }
-
-    Label.label {
-        margin: 1 1 1 2; /* T R B L */
-        width: 15;
-        text-align: right;
-    }
-
-    #system-prompt-input {
-        width: 1fr;
-    }
-
-    #model-input {
-        width: 1fr;
-    }
-
-    #config-buttons {
-        height: auto;
-        margin-top: 1;
-        align: center middle;
-    }
+    Prompt { background: $primary 10%; color: $text; margin: 1; margin-right: 8; padding: 1 2 0 2; }
+    Response { border: wide $success; background: $success 10%; color: $text; margin: 1; margin-left: 8; padding: 1 2 0 2; }
+    #chat-view { height: 1fr; }
+    Horizontal { height: auto; }
+    Label.label { margin: 1 1 1 2; width: 15; text-align: right; }
+    #system-prompt-input, #model-input { width: 1fr; }
+    #config-buttons { height: auto; margin-top: 1; align: center middle; }
     """
-    mcp_server_configs: dict[str, MCPServerStdio]
-    agent: Agent | None = None
+
+    model_identifier: str
+    system_prompt: str
+    prompt_queue: queue.Queue[tuple[str, Response | None] | None]
+    agent_worker_instance: Worker | None = None
 
     def compose(self) -> ComposeResult:
-        """Compose the UI layout"""
         yield Header()
         with Horizontal():
             yield Label("Model:", classes="label")
@@ -116,21 +73,15 @@ class TerminalApp(App):
         yield Footer()
 
     def get_time_greeting(self) -> str:
-        """Return appropriate greeting based on time of day"""
         hour = datetime.now().hour
         if 5 <= hour < 12:
             return "Good morning!"
-        elif 12 <= hour < 18:
+        if 12 <= hour < 18:
             return "Good afternoon!"
-        else:
-            return "Good evening!"
+        return "Good evening!"
 
     def on_mount(self) -> None:
-        """Initialize the app, load configs, and settings."""
         ensure_config_file()
-        self.mcp_server_configs = load_mcp_servers_from_config()
-        logging.info(f"Loaded {len(self.mcp_server_configs)} MCP server configurations.")
-
         loaded_settings = load_settings()
         self.model_identifier = loaded_settings["model_identifier"]
         self.system_prompt = loaded_settings["system_prompt"]
@@ -138,245 +89,280 @@ class TerminalApp(App):
         self.query_one("#model-input", Input).value = self.model_identifier
         self.query_one("#system-prompt-input", Input).value = self.system_prompt
 
-        self.message_history = []
-
-        self._initialize_agent()
-
+        self.prompt_queue = queue.Queue()
+        self._start_agent_worker()
         self.query_one("#chat-input", Input).focus()
 
-    def _initialize_agent(self) -> None:
-        """Initializes or re-initializes the Agent instance."""
-        logging.info(f"Initializing agent with model '{self.model_identifier}' and {len(self.mcp_server_configs)} servers.")
-        mcp_servers: list[MCPServerStdio] = list(self.mcp_server_configs.values())
+    async def on_unmount(self) -> None:
+        log.info("Stopping agent worker...")
+        await self._stop_agent_worker()
+
+    def _start_agent_worker(self):
+        if self.agent_worker_instance and self.agent_worker_instance.state == WorkerState.RUNNING:
+            log.warning("Agent worker already running.")
+            return
+        log.info(f"Starting agent worker for model '{self.model_identifier}'...")
+        self.agent_worker_instance = self.agent_worker(self.model_identifier, self.system_prompt)
+
+    async def _stop_agent_worker(self):
+        terminal_states = {WorkerState.CANCELLED, WorkerState.ERROR, WorkerState.SUCCESS}
+        
+        worker_instance = self.agent_worker_instance
+        
+        if not worker_instance:
+            log.info("_stop_agent_worker: No worker instance found.")
+            return
+
+        # Log the initial state
+        initial_state = worker_instance.state
+        log.info(f"_stop_agent_worker: Initial worker state: {initial_state}")
+
+        # Always try to unblock the queue
+        log.info("Signalling agent worker to stop via queue...")
         try:
-            self.agent = Agent(
-                self.model_identifier,
-                system_prompt=self.system_prompt,
-                mcp_servers=mcp_servers
-            )
-            logging.info("Agent initialized successfully.")
-        except (UserError, AgentRunError) as e:
-            logging.exception(f"Failed to initialize Agent with {self.model_identifier}: {e}")
-            self.query_one("#chat-view").mount(Response(f"*Error initializing Agent: {e}. Please check model identifier and configuration.*"))
+            self.prompt_queue.put(None)
         except Exception as e:
-            logging.exception(f"An unexpected error occurred during agent initialization: {e}")
-            self.query_one("#chat-view").mount(Response(f"*Unexpected error initializing Agent: {e}.*"))
+            log.error(f"Error putting None into prompt_queue: {e}")
+
+        # Now check state again and cancel if needed
+        current_state = worker_instance.state 
+
+        if current_state not in terminal_states:
+            log.info(f"_stop_agent_worker: Worker state ({current_state}) is not terminal, requesting cancellation.")
+            try:
+                await self.workers.cancel_group(self, "agent_group")
+                log.info("Agent worker group cancellation requested.")
+                await asyncio.sleep(0.1) # Short delay to allow cancellation processing
+                final_state = worker_instance.state
+                log.info(f"_stop_agent_worker: State after cancellation attempt: {final_state}")
+            except Exception as e:
+                 log.error(f"Error during worker cancellation: {e}")
+        else:
+            log.info(f"_stop_agent_worker: Worker state ({current_state}) already terminal, skipping cancellation request.")
+
+        self.agent_worker_instance = None # Ensure it's cleared
+        log.info("_stop_agent_worker: Finished.")
+
+    @work(thread=True, group="agent_group", exclusive=True, description="Agent Service Background Thread")
+    def agent_worker(self, model_id: str, sys_prompt: str) -> None:
+        """Runs AgentService lifecycle and prompt processing in a background thread."""
+        worker_ident = threading.get_ident()
+        log.info(f"[Worker Thread {worker_ident}] Starting agent logic...")
+        async def _run_async_agent_logic():
+            agent_service = AgentService(log_to_chat_callback=self._log_to_chat)
+            initialized_successfully = False
+            log.info(f"[Worker {worker_ident}] Initializing AgentService for {model_id}...")
+            try:
+                await agent_service.initialize(model_id, sys_prompt)
+                initialized_successfully = agent_service.is_initialized
+
+                if not initialized_successfully:
+                    log.error("[Worker] AgentService failed to initialize.")
+                    self.call_from_thread(self._log_to_chat, "*Agent worker failed to initialize. See logs.*", False)
+                    return
+
+                log.info("[Worker] AgentService initialized. Waiting for prompts...")
+                while True:
+                    item = self.prompt_queue.get()
+
+                    if item is None:
+                        log.info(f"[Worker {worker_ident}] Received stop signal (None).")
+                        self.prompt_queue.task_done()
+                        break # Exit the loop
+
+                    prompt, response_widget = item
+
+                    # Handle special signals
+                    if prompt == "__CLEAR_HISTORY__":
+                        log.info("[Worker] Received clear history signal.")
+                        if agent_service and agent_service.is_initialized:
+                            await agent_service.clear_history()
+                        else:
+                            log.warning("[Worker] Agent not initialized, cannot clear history.")
+                        self.prompt_queue.task_done()
+                        continue # Skip processing as a prompt
+
+                    # Ensure we have a response widget for actual prompts
+                    if response_widget is None:
+                        log.error(f"[Worker] Received prompt '{prompt[:20]}...' without a Response widget. Skipping.")
+                        self.prompt_queue.task_done()
+                        continue
+
+                    log.info(f"[Worker] Processing prompt: {prompt[:50]}...")
+                    # Initialize outside try block for use in except/finally
+                    current_cumulative_text = ""
+                    first_chunk_received = False # Track if we've received the first chunk
+
+                    try:
+                        # Call process_prompt_stream without passing history
+                        stream_generator = await agent_service.process_prompt_stream(prompt)
+
+                        if stream_generator is None:
+                            log.error("[Worker] Failed to get stream generator (AgentService likely not initialized).")
+                            error_message = f"**{agent_service.model_identifier}:** -- **Error: Agent not ready or failed to start stream.**"
+                            self.call_from_thread(response_widget.update, error_message)
+                        else:
+                            # Handle the stream
+                            async for event in stream_generator:
+                                log.debug(f"[Worker Stream] Received event: type={type(event).__name__}, event={event!r}")
+
+                                if isinstance(event, str):
+                                    current_cumulative_text = event # Track last text
+                                    content_to_display = f"**{agent_service.model_identifier}:** {current_cumulative_text}"
+
+                                    # Removed first_chunk_received check for loading=False
+                                    # The first update will replace the placeholder
+                                    first_chunk_received = True
+                                    log.debug(f"[Worker Stream] Updating UI with content: '{content_to_display[:100]}...'")
+                                    self.call_from_thread(response_widget.update, content_to_display)
+                                    self.call_from_thread(response_widget.scroll_visible)
+                                    await asyncio.sleep(0.01) # Throttle UI updates
+
+                            # If the stream finished but we never received a text chunk, update the placeholder
+                            if not first_chunk_received:
+                                 log.debug("[Worker Stream] Stream finished without text event. Updating placeholder.")
+                                 final_message = f"**{agent_service.model_identifier}:** (Processing complete)" # Or similar
+                                 self.call_from_thread(response_widget.update, final_message)
+
+                            log.debug(f"[Worker Stream] Exiting loop. Final text received: '{current_cumulative_text[:100]}...'")
+                            log.debug("[Worker] Stream processing finished.")
+
+                    except Exception as e:
+                        log.exception(f"[Worker] Error during agent prompt processing: {e}")
+                        # Update placeholder with error message
+                        error_message = f"**{agent_service.model_identifier}:** -- **Error processing response.**"
+                        self.call_from_thread(response_widget.update, error_message)
+
+                    finally:
+                        self.prompt_queue.task_done()
+
+            except asyncio.CancelledError:
+                log.info(f"[Worker {worker_ident}] Agent task (_run_async_agent_logic) explicitly cancelled.")
+                # If cancelled while processing a prompt, mark task as done
+                if 'item' in locals() and item is not None:
+                    log.info(f"[Worker {worker_ident}] Marking task done due to cancellation during processing.")
+                    self.prompt_queue.task_done()
+            finally:
+                log.info(f"[Worker {worker_ident}] Exiting _run_async_agent_logic.")
+
+        try:
+            # log.info(f"[Worker Thread {threading.get_ident()}] Starting agent logic...") # Moved inside
+            asyncio.run(_run_async_agent_logic())
+            log.info(f"[Worker Thread {worker_ident}] Agent logic finished normally.")
+        except Exception as e:
+             log.exception(f"[Worker Thread {worker_ident}] Error running agent async logic: {e}")
+             self.call_from_thread(self._log_to_chat, f"*Agent worker thread critical error: {e}. See logs.*", False)
+        finally:
+             log.info(f"[Worker Thread {worker_ident}] Exiting agent_worker method.")
 
     @on(Input.Submitted, "#chat-input")
     async def on_input(self, event: Input.Submitted) -> None:
-        """Handle input submissions, select servers, and run a dynamic agent."""
         chat_view = self.query_one("#chat-view")
-        prompt = event.value
+        prompt = event.value.strip()
         event.input.clear()
 
-        await chat_view.mount(Prompt(f"**You:** {prompt}"))
-        await chat_view.mount(response := Response())
-        response.anchor()
-
-        self.process_prompt(prompt, response)
-
-    @work(thread=True)
-    async def process_prompt(self, prompt: str, response: Response) -> None:
-        """Process the prompt: set up agent run and handle results."""
-        logging.info(f"Processing prompt: {prompt}")
-        initial_response_content = f"**{self.model_identifier}:** "
-        self.call_from_thread(response.update, initial_response_content)
-
-        if self.agent is None:
-            logging.error("Agent is not initialized. Cannot process prompt.")
-            error_message = f"{initial_response_content} -- **Error: Agent not initialized. Check configuration and logs.**"
-            self.call_from_thread(response.update, error_message)
+        if not prompt:
             return
 
-        mcp_servers = list(self.mcp_server_configs.values())
-        last_displayed_content = initial_response_content
+        await chat_view.mount(Prompt(f"**You:** {prompt}"))
+        placeholder_text = f"**{self.model_identifier}:** 💭"
+        response_widget = Response(placeholder_text)
+        await chat_view.mount(response_widget)
+        response_widget.scroll_visible()
 
-        try:
-            async with self.agent.run_mcp_servers():
-                logging.info(f"MCP servers ({len(mcp_servers)}) started for agent.")
-                async with self.agent.run_stream(prompt, message_history=self.message_history) as run_result:
-                    logging.info("Agent stream started.")
-
-                    last_displayed_content = await self._handle_stream_events(
-                        run_result.stream(),
-                        response,
-                        initial_response_content
-                    )
-
-                    logging.info("Stream processing loop finished.")
-                    self.message_history = run_result.all_messages()
-
-                    try:
-                        history_repr = repr(self.message_history)
-                        logging.debug(f"Message history immediately after stream end ({len(self.message_history)} messages):\n{history_repr}")
-                    except Exception as hist_log_e:
-                        logging.error(f"Error logging message history representation: {hist_log_e}")
-
-                    logging.info(f"Message history updated. Length: {len(self.message_history)}")
-
-                    await self._finalize_response(response, last_displayed_content)
-
-            logging.info(f"MCP servers ({len(mcp_servers)}) stopped for agent.")
-
-        except Exception as e:
-            logging.exception(f"Error during agent prompt processing: {e}")
-            error_message = f"{last_displayed_content} -- **Error:** {e}"
-            self.call_from_thread(response.update, error_message)
-
-        logging.debug("Finished processing prompt with agent.")
-
-    async def _handle_stream_events(self, stream, response: Response, initial_content: str) -> str:
-        """Iterates through stream events, updates UI, and returns the last displayed content."""
-        current_text_response = ""
-        tool_call_in_progress_message = ""
-        last_displayed_content = initial_content
-        response_prefix = f"**{self.model_identifier}:** "
-
-        async for event in stream:
-            log_prefix = f"Stream Event Received: Type={type(event).__name__}"
-            log_details = []
-
-            content_to_display = last_displayed_content
-
-            if isinstance(event, PartStartEvent):
-                log_details.append(f"Index={event.index}")
-                log_details.append(f"Part={event.part!r}")
-                if isinstance(event.part, ToolCallPart):
-                    tool_name = event.part.tool_name
-                    tool_call_in_progress_message = f"\n*Assistant is using tool: `{tool_name}`...*"
-                    content_to_display = f"{response_prefix}{current_text_response}{tool_call_in_progress_message}"
-                    logging.info(f"Tool call started: {tool_name}")
-
-            elif isinstance(event, PartDeltaEvent):
-                log_details.append(f"Index={event.index}")
-                if isinstance(event.delta, TextPartDelta):
-                    log_details.append(f"Delta=TextPartDelta(content_delta={event.delta.content_delta!r})")
-                    current_text_response += event.delta.content_delta
-                    tool_call_in_progress_message = ""
-                    content_to_display = f"{response_prefix}{current_text_response}"
-                elif isinstance(event.delta, ToolCallPartDelta):
-                    log_details.append(f"Delta=ToolCallPartDelta(args_delta={event.delta.args_delta})")
-                    content_to_display = f"{response_prefix}{current_text_response}{tool_call_in_progress_message}"
-                else:
-                    log_details.append(f"Delta={event.delta!r}")
-
-            elif isinstance(event, FunctionToolCallEvent):
-                 log_details.append(f"Part={event.part!r}")
-
-            elif isinstance(event, FunctionToolResultEvent):
-                log_details.append(f"ToolCallID={event.tool_call_id!r}")
-                log_details.append(f"Result={event.result!r}")
-
-            elif isinstance(event, FinalResultEvent):
-                if hasattr(event, 'tool_name'): log_details.append(f"ToolName={event.tool_name!r}")
-                if hasattr(event, 'tool_call_id'): log_details.append(f"ToolCallID={event.tool_call_id!r}")
-                if hasattr(event, 'data'): log_details.append(f"Data={event.data!r}")
-
-            else:
-                 log_details.append(f"EventRepr={event!r}")
-
-            logging.debug(f"{log_prefix} | Details: {{ {', '.join(log_details)} }}")
-
-            if content_to_display != last_displayed_content:
-                self.call_from_thread(response.update, content_to_display)
-                last_displayed_content = content_to_display
-
-        return last_displayed_content
-
-    async def _finalize_response(self, response: Response, last_displayed_content: str) -> None:
-        """Extracts final text from history and updates UI if needed."""
-        final_response_text = None
-        try:
-            for msg in reversed(self.message_history):
-                if isinstance(msg, ModelResponse):
-                    for part in msg.parts:
-                        if isinstance(part, TextPart) and not hasattr(part, 'tool_call_id') and not hasattr(part, 'tool_return_id'):
-                            final_response_text = part.content
-                            break
-                    if final_response_text is not None:
-                        break
-
-            if final_response_text:
-                logging.info(f"Agent final response extracted from history: {final_response_text[:100]}...")
-                final_expected_content = f"**{self.model_identifier}:** {final_response_text}"
-                if final_expected_content != last_displayed_content:
-                    logging.info("Stream ended before final text was fully displayed, performing final UI update.")
-                    self.call_from_thread(response.update, final_expected_content)
-                else:
-                    logging.info("Final text response matches last streamed content.")
-            else:
-                logging.warning("Could not find final assistant text content in history after stream completion.")
-        except Exception as log_e:
-            logging.error(f"Error trying to extract/log final agent response from history: {log_e}")
-
-    def _update_and_restart(self) -> None:
-        """Save settings, reinitialize agent, and focus chat input."""
-        if not save_settings(self.model_identifier, self.system_prompt):
-            self.query_one("#chat-view").mount(Markdown(f"*Error saving settings to `{SETTINGS_PATH}`*"))
-        self._initialize_agent()
-        self.query_one("#chat-input", Input).focus()
+        if self.agent_worker_instance and self.agent_worker_instance.state == WorkerState.RUNNING:
+             log.debug(f"Queueing prompt: {prompt[:50]}...")
+             self.prompt_queue.put((prompt, response_widget))
+        else:
+            log.error("Agent worker not running. Cannot process prompt.")
+            await response_widget.update("*Error: Agent worker not ready.*")
 
     @on(Input.Submitted, "#model-input")
     @on(Input.Submitted, "#system-prompt-input")
-    def on_settings_change_submitted(self, event: Input.Submitted) -> None:
-        """Handle both model and system-prompt input submissions."""
+    async def on_settings_change_submitted(self, event: Input.Submitted) -> None:
         widget_id = event.input.id
-        if widget_id == "model-input":
-            new_model = event.value
-            if new_model and new_model != self.model_identifier:
-                self.model_identifier = new_model
-                logging.info(f"Model identifier changed to: {self.model_identifier}")
-                self.query_one("#chat-view").mount(Markdown(f"*Model set to **{self.model_identifier}**. Re-initializing agent...*"))
-            elif not new_model:
-                logging.warning("Model input submitted empty.")
-                return
-            else:
-                logging.info("Model input submitted, but model identifier is unchanged.")
-                return
-        else:
-            new_prompt = event.value
-            if new_prompt and new_prompt != self.system_prompt:
-                self.system_prompt = new_prompt
-                logging.info(f"System prompt updated to: '{self.system_prompt[:50]}...'")
-                self.query_one("#chat-view").mount(Markdown("*System prompt updated. Re-initializing agent...*"))
-            else:
-                logging.info("System prompt submitted, but prompt is unchanged.")
-                return
+        needs_restart = False
 
-        self._update_and_restart()
+        if widget_id == "model-input":
+            new_model = event.value.strip()
+            if new_model and new_model != self.model_identifier:
+                log.info(f"Model changed: {self.model_identifier} -> {new_model}")
+                self.model_identifier = new_model
+                self._log_to_chat(f"*Model set to **{self.model_identifier}**. Re-initializing agent...*", False)
+                needs_restart = True
+            elif not new_model:
+                log.warning("Model input submitted empty.")
+                event.input.value = self.model_identifier # Restore
+                self.query_one("#chat-input", Input).focus()
+                return # Don't restart if value is invalid/unchanged
+        else: # system-prompt-input
+            new_prompt = event.value
+            if new_prompt != self.system_prompt:
+                log.info(f"System prompt updated (first 50 chars): '{new_prompt[:50]}...'")
+                self.system_prompt = new_prompt
+                self._log_to_chat("*System prompt updated. Re-initializing agent...*", False)
+                needs_restart = True
+
+        if needs_restart:
+            if not save_settings(self.model_identifier, self.system_prompt):
+                self._log_to_chat(f"*Error saving settings to `{SETTINGS_PATH}`*", False)
+            log.info("Restarting agent worker due to settings change...")
+            await self._stop_agent_worker()
+            self._start_agent_worker()
+
+        self.query_one("#chat-input", Input).focus()
+
 
     @on(Button.Pressed)
     async def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Unified handler for new-chat, edit-config, and reload-config buttons."""
         btn_id = event.button.id
         if btn_id == "new-chat-button":
-            logging.info("'New Chat' button pressed. Clearing history and display.")
-            self.message_history = []
+            log.info("New chat requested.")
+            # Clear visual chat display
             chat_view = self.query_one("#chat-view")
             await chat_view.remove_children()
             await chat_view.mount(Response(f"# {self.get_time_greeting()} How can I help?"))
+            # Send signal to worker thread to clear its history
+            if self.agent_worker_instance and self.agent_worker_instance.state == WorkerState.RUNNING:
+                log.info("Sending clear history signal to agent worker.")
+                self.prompt_queue.put(("__CLEAR_HISTORY__", None))
+            else:
+                log.warning("Agent worker not running, cannot send clear history signal.")
+                self._log_to_chat("*Agent not running, unable to clear history state.*")
         elif btn_id == "edit-config-button":
-            logging.info(f"Opening config file: {MCP_CONFIG_PATH}")
+            log.info(f"Opening config file: {MCP_CONFIG_PATH}")
             self._open_file_in_editor(MCP_CONFIG_PATH)
         elif btn_id == "reload-config-button":
-            logging.info("Reloading MCP configuration...")
-            self.mcp_server_configs = load_mcp_servers_from_config()
-            server_names = list(self.mcp_server_configs.keys())
-            self._initialize_agent()
-            self._log_to_chat(f"*MCP Configuration reloaded and agent re-initialized. Found {len(server_names)} server configs: {', '.join(server_names) or 'None'}*")
-            logging.info(f"MCP configuration reloaded. Found configs: {server_names}")
-        self._focus_input()
-
-    def _log_to_chat(self, text: str) -> None:
-        """Mount Markdown text to chat view."""
-        self.query_one("#chat-view").mount(Markdown(text))
-
-    def _focus_input(self) -> None:
-        """Set focus back to the chat input."""
+            log.info("Reloading MCP config and restarting agent...")
+            self._log_to_chat("*Reloading MCP Configuration and re-initializing agent...*")
+            await self._stop_agent_worker()
+            self._start_agent_worker()
         self.query_one("#chat-input", Input).focus()
 
+    def _log_to_chat(self, text: str, use_call_from_thread: bool = True) -> None:
+        """Mount Markdown text to chat view, handling thread safety."""
+        widget = Markdown(text)
+        chat_view = self.query_one("#chat-view", VerticalScroll) # Ensure correct type hint/query
+
+        # Simplified thread check and dispatch
+        if use_call_from_thread and threading.current_thread() is not threading.main_thread():
+            try:
+                self.call_from_thread(chat_view.mount, widget)
+                self.call_from_thread(widget.scroll_visible)
+            except Exception as e:
+                log.error(f"Error in call_from_thread within _log_to_chat: {e}", exc_info=True)
+        elif self.is_running: # In main thread or explicitly told not to use call_from_thread
+             try:
+                 # Use call_later for safety even in main thread if app is running
+                 self.call_later(chat_view.mount, widget)
+                 self.call_later(widget.scroll_visible)
+             except Exception as e:
+                 log.error(f"Error in direct/call_later mount within _log_to_chat: {e}", exc_info=True)
+        # else: App not running yet, mounting might fail, rely on standard logging
+
     def _open_file_in_editor(self, path: str) -> None:
-        """Open a file in the default system editor, with error handling."""
+        """Open a file in the default system editor."""
+        log.info(f"Attempting to open '{path}' in editor.")
         try:
             system = platform.system()
             if system == "Windows":
@@ -385,38 +371,50 @@ class TerminalApp(App):
                 subprocess.run(["open", path], check=True)
             else:
                 subprocess.run(["xdg-open", path], check=True)
-            self._log_to_chat(f"*Opened `{path}` for editing. Press 'Reload MCP Config' after saving.*")
-        except FileNotFoundError:
-            logging.error(f"Config file {path} not found.")
-            self._log_to_chat(f"*Error: Config file `{path}` not found.*")
-        except Exception as e:
-            logging.error(f"Failed to open config file {path}: {e}")
-            self._log_to_chat(f"*Error opening `{path}`: {e}*")
+            self._log_to_chat(f"*Opened `{path}`. Reload MCP Config after saving.*", False)
+        except (FileNotFoundError, subprocess.CalledProcessError, Exception) as e:
+            log.error(f"Failed to open file '{path}' in editor: {e}")
+            self._log_to_chat(f"*Error opening `{path}`: {e}*", False)
 
-def main():
-    """Synchronous entry point that sets up logging, runs initial async tasks, and starts the app."""
-    log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(threadName)s - %(message)s')
+
+def setup_logging():
+    """Configure logging for the application."""
+    log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(threadName)s - %(name)s - %(message)s')
     log_handler = FileHandler('app.log', mode='w')
     log_handler.setFormatter(log_formatter)
 
+    # Configure root logger minimally
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
-
+    root_logger.setLevel(logging.WARNING)
+    # Clear existing handlers if any
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
-
     root_logger.addHandler(log_handler)
 
+    # Configure pydantic_ai logger
+    pydantic_ai_logger = logging.getLogger("pydantic_ai")
+    pydantic_ai_logger.setLevel(logging.INFO)
+    pydantic_ai_logger.addHandler(log_handler)
+    pydantic_ai_logger.propagate = False
+
+    # Configure our application logger (__name__)
+    app_module_logger = logging.getLogger(__name__) # Use module name
+    app_module_logger.setLevel(logging.DEBUG)
+    app_module_logger.addHandler(log_handler)
+    app_module_logger.propagate = False # Important to prevent double logging
+
+def main():
+    """Entry point: Setup logging and run the app."""
+    setup_logging()
+    log.info("Starting Textual application.")
     try:
-        logging.info("Starting Textual application.")
         app = TerminalApp()
         app.run()
-        logging.info("Application finished.")
-
+        log.info("Application finished.")
     except Exception as e:
-        logging.basicConfig(filename='app.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(threadName)s - %(message)s')
-        logging.exception("Application crashed.")
+        log.exception("Application crashed.")
         print(f"Application crashed: {e}", file=sys.stderr)
         sys.exit(1)
 
-# The if __name__ == "__main__": block is ommitted as we are using uv run to start the app
+if __name__ == "__main__":
+    main()
